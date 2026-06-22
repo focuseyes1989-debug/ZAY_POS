@@ -1,0 +1,18 @@
+# ui/inventory_page/__init__.py
+from ui.inventory_page.inventory_tabs import InventoryPage
+from ui.inventory_page.product_transaction_history_dialog import ProductTransactionHistoryDialog
+from ui.inventory_page.current_stock_tab import CurrentStockTab
+from ui.inventory_page.low_stock_tab import LowStockTab
+from ui.inventory_page.suppliers_tab import SuppliersTab
+from ui.inventory_page.purchase_history_tab import PurchaseHistoryTab
+from ui.inventory_page.expiry_tab import ExpiryTab
+from ui.inventory_page.logs_tab import LogsTab
+from ui.inventory_page.stock_by_location_tab import StockByLocationTab
+from ui.inventory_page.stock_in_dialog import StockInDialog
+from ui.inventory_page.stock_out_dialog import StockOutDialog
+from ui.inventory_page.adjustment_dialog import AdjustmentDialog
+from ui.inventory_page.supplier_dialog import SupplierDialog
+from ui.inventory_page.purchase_order_dialog import PurchaseOrderEditDialog
+from ui.inventory_page.warehouse_dialog import WarehouseDialog
+from ui.inventory_page.product_location_dialog import ProductLocationDialog
+from ui.inventory_page.stock_transfer_dialog import StockTransferDialog  # Add this line

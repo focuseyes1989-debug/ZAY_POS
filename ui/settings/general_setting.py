@@ -1,0 +1,484 @@
+# ui/general_setting.py
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QGroupBox, QLabel, QLineEdit,
+    QPushButton, QTableWidget, QTableWidgetItem, QMessageBox, QHeaderView,
+    QDialog, QFormLayout, QDialogButtonBox, QCheckBox, QDoubleSpinBox,
+    QSpinBox, QScrollArea, QFrame, QComboBox
+)
+from PyQt6.QtCore import Qt, pyqtSignal
+from models.database import connect_db
+from utils.language import lang
+
+
+class PaymentTypeDialog(QDialog):
+    def __init__(self, payment_id=None, current_name=""):
+        super().__init__()
+        self.payment_id = payment_id
+        self.setMinimumWidth(300)
+        layout = QFormLayout()
+        self.name_edit = QLineEdit()
+        self.name_edit.setText(current_name)
+        layout.addRow(QLabel("Name:"), self.name_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setLayout(layout)
+        self.retranslateUi()
+
+    def retranslateUi(self):
+        if lang.get_current() == "my":
+            self.setWindowTitle("ငွေပေးချေမှုအမျိုးအစား" if self.payment_id is None else "ငွေပေးချေမှုအမျိုးအစားပြင်ဆင်ရန်")
+        else:
+            self.setWindowTitle("Add Payment Type" if self.payment_id is None else "Edit Payment Type")
+
+    def get_name(self):
+        return self.name_edit.text().strip()
+
+
+class GeneralSettingWidget(QWidget):
+    settings_saved = pyqtSignal()
+    follow_system_theme_changed = pyqtSignal(bool)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.selected_payment_id = None
+        self.setup_ui()
+        self.load_payment_types()
+        self.load_tax_settings()
+        self.load_loyalty_settings()
+        self.load_discount_settings()
+        self.load_appearance_settings()
+
+    def setup_ui(self):
+        layout = QVBoxLayout()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setSpacing(20)
+
+        columns_layout = QHBoxLayout()
+        columns_layout.setSpacing(20)
+
+        left_column = QWidget()
+        left_layout = QVBoxLayout(left_column)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+
+        right_column = QWidget()
+        right_layout = QVBoxLayout(right_column)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Payment Types (left)
+        self.payment_group = QGroupBox()
+        payment_layout = QVBoxLayout()
+        self.payment_table = QTableWidget()
+        self.payment_table.setColumnCount(2)
+        self.payment_table.setColumnHidden(0, True)
+        self.payment_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.payment_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.payment_table.cellClicked.connect(self.select_payment)
+        self.payment_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        payment_layout.addWidget(self.payment_table)
+        btn_layout = QHBoxLayout()
+        self.btn_add_pay = QPushButton()
+        self.btn_edit_pay = QPushButton()
+        self.btn_delete_pay = QPushButton()
+        self.btn_add_pay.clicked.connect(self.add_payment_type)
+        self.btn_edit_pay.clicked.connect(self.edit_payment_type)
+        self.btn_delete_pay.clicked.connect(self.delete_payment_type)
+        btn_layout.addWidget(self.btn_add_pay)
+        btn_layout.addWidget(self.btn_edit_pay)
+        btn_layout.addWidget(self.btn_delete_pay)
+        payment_layout.addLayout(btn_layout)
+        self.payment_group.setLayout(payment_layout)
+        left_layout.addWidget(self.payment_group)
+
+        # Tax (left)
+        self.tax_group = QGroupBox()
+        tax_layout = QHBoxLayout()
+        self.tax_enabled = QCheckBox()
+        self.tax_rate = QDoubleSpinBox()
+        self.tax_rate.setRange(0, 100)
+        self.tax_rate.setSuffix(" %")
+        self.tax_rate.setDecimals(2)
+        tax_layout.addWidget(self.tax_enabled)
+        tax_layout.addWidget(QLabel("Tax Rate:"))
+        tax_layout.addWidget(self.tax_rate)
+        tax_layout.addStretch()
+        self.tax_group.setLayout(tax_layout)
+        left_layout.addWidget(self.tax_group)
+
+        # Loyalty (right)
+        self.royalty_group = QGroupBox()
+        royalty_layout = QFormLayout()
+        self.points_per_dollar = QDoubleSpinBox()
+        self.points_per_dollar.setRange(0, 100)
+        self.points_per_dollar.setDecimals(2)
+        self.points_per_dollar.setSuffix(" points per $ spent")
+        self.min_points = QSpinBox()
+        self.min_points.setRange(0, 10000)
+        self.min_points.setSuffix(" points")
+        self.reward_discount = QDoubleSpinBox()
+        self.reward_discount.setRange(0, 1000)
+        self.reward_discount.setDecimals(2)
+        self.reward_discount.setSuffix(" $ discount")
+        self.points_expiry_months = QSpinBox()
+        self.points_expiry_months.setRange(0, 60)
+        self.points_expiry_months.setSuffix(" months (0 = never)")
+        self.points_dollar_value = QDoubleSpinBox()
+        self.points_dollar_value.setRange(0, 1)
+        self.points_dollar_value.setDecimals(3)
+        self.points_dollar_value.setSingleStep(0.001)
+        self.points_dollar_value.setSuffix(" $ per point")
+
+        royalty_layout.addRow(QLabel("Points per $:"), self.points_per_dollar)
+        royalty_layout.addRow(QLabel("Minimum points for reward:"), self.min_points)
+        royalty_layout.addRow(QLabel("Reward discount amount:"), self.reward_discount)
+        royalty_layout.addRow(QLabel("Points expiry (months, 0=never):"), self.points_expiry_months)
+        royalty_layout.addRow(QLabel("Value per point ($):"), self.points_dollar_value)
+        self.royalty_group.setLayout(royalty_layout)
+        right_layout.addWidget(self.royalty_group)
+
+        # Discount (right)
+        self.discount_group = QGroupBox()
+        discount_layout = QFormLayout()
+        self.discount_enabled = QCheckBox()
+        discount_layout.addRow("", self.discount_enabled)
+        self.discount_type_percent = QCheckBox()
+        self.discount_type_fixed = QCheckBox()
+        self.discount_type_manual = QCheckBox()
+        self.discount_type_percent.toggled.connect(lambda: self.discount_type_fixed.setChecked(False) if self.discount_type_percent.isChecked() else None)
+        self.discount_type_percent.toggled.connect(lambda: self.discount_type_manual.setChecked(False) if self.discount_type_percent.isChecked() else None)
+        self.discount_type_fixed.toggled.connect(lambda: self.discount_type_percent.setChecked(False) if self.discount_type_fixed.isChecked() else None)
+        self.discount_type_fixed.toggled.connect(lambda: self.discount_type_manual.setChecked(False) if self.discount_type_fixed.isChecked() else None)
+        self.discount_type_manual.toggled.connect(lambda: self.discount_type_percent.setChecked(False) if self.discount_type_manual.isChecked() else None)
+        self.discount_type_manual.toggled.connect(lambda: self.discount_type_fixed.setChecked(False) if self.discount_type_manual.isChecked() else None)
+        type_layout = QVBoxLayout()
+        type_layout.addWidget(self.discount_type_percent)
+        type_layout.addWidget(self.discount_type_fixed)
+        type_layout.addWidget(self.discount_type_manual)
+        discount_layout.addRow("Discount Type:", type_layout)
+        self.discount_value = QDoubleSpinBox()
+        self.discount_value.setRange(0, 100000)
+        self.discount_value.setDecimals(2)
+        self.discount_value.setSuffix("%")
+        self.discount_value.setEnabled(False)
+        self.discount_type_percent.toggled.connect(lambda: self.discount_value.setSuffix("%") if self.discount_type_percent.isChecked() else self.discount_value.setSuffix("$"))
+        self.discount_type_fixed.toggled.connect(lambda: self.discount_value.setSuffix("$"))
+        self.discount_type_manual.toggled.connect(lambda: self.discount_value.setEnabled(False))
+        self.discount_type_percent.toggled.connect(lambda: self.discount_value.setEnabled(True))
+        self.discount_type_fixed.toggled.connect(lambda: self.discount_value.setEnabled(True))
+        discount_layout.addRow("Default Value:", self.discount_value)
+        self.discount_group.setLayout(discount_layout)
+        right_layout.addWidget(self.discount_group)
+
+        # Appearance (right) - with theme selection
+        self.appearance_group = QGroupBox()
+        appearance_layout = QFormLayout()
+        
+        # Theme selection combo box
+        self.theme_combo = QComboBox()
+        self.theme_combo.addItems([
+            "Light", 
+            "Dark", 
+            "Light Gray", 
+            "Ubuntu", 
+            "Ubuntu Dark", 
+            "Windows XP",
+            "PyQt6 Light",
+            "PyQt6 Dark"
+        ])
+        appearance_layout.addRow(QLabel("Theme:"), self.theme_combo)
+        
+        self.follow_system_theme_check = QCheckBox("Follow system theme (auto-switch)")
+        self.follow_system_theme_check.toggled.connect(self.on_follow_system_toggled)
+        appearance_layout.addRow("", self.follow_system_theme_check)
+        
+        self.appearance_group.setLayout(appearance_layout)
+        right_layout.addWidget(self.appearance_group)
+
+        columns_layout.addWidget(left_column)
+        columns_layout.addWidget(right_column)
+        content_layout.addLayout(columns_layout)
+
+        self.btn_save = QPushButton()
+        self.btn_save.clicked.connect(self.save_settings)
+        content_layout.addWidget(self.btn_save, alignment=Qt.AlignmentFlag.AlignCenter)
+        content_layout.addStretch()
+
+        scroll.setWidget(content)
+        layout.addWidget(scroll)
+        self.setLayout(layout)
+
+    def retranslateUi(self):
+        if lang.get_current() == "my":
+            self.payment_group.setTitle("ငွေပေးချေမှုအမျိုးအစားများ")
+            self.payment_table.setHorizontalHeaderLabels(["ID", "ငွေပေးချေမှုအမည်"])
+            self.btn_add_pay.setText("အသစ်ထည့်")
+            self.btn_edit_pay.setText("ပြင်ဆင်")
+            self.btn_delete_pay.setText("ဖျက်")
+            self.tax_group.setTitle("အခွန်သတ်မှတ်ချက်")
+            self.tax_enabled.setText("အခွန်သုံးမည်")
+            self.royalty_group.setTitle("အမှတ်ပေးစနစ်")
+            for row in range(self.royalty_group.layout().rowCount()):
+                label_item = self.royalty_group.layout().itemAt(row, QFormLayout.ItemRole.LabelRole)
+                if label_item and isinstance(label_item.widget(), QLabel):
+                    text = label_item.widget().text()
+                    if "Points per $" in text:
+                        label_item.widget().setText("တစ်ဒေါ်လာလျှင်ရမည့်အမှတ်:")
+                    elif "Minimum points for reward" in text:
+                        label_item.widget().setText("ဆုချီးမြှင့်ရန်အနည်းဆုံးအမှတ်:")
+                    elif "Reward discount amount" in text:
+                        label_item.widget().setText("ဆုလျှော့စျေးပမာဏ:")
+                    elif "Points expiry" in text:
+                        label_item.widget().setText("အမှတ်သက်တမ်းကုန်ရက် (လ၊ ၀=ဘယ်တော့မှမကုန်):")
+                    elif "Value per point" in text:
+                        label_item.widget().setText("တစ်အမှတ်တန်ဖိုး ($):")
+            self.discount_group.setTitle("လျှော့စျေးသတ်မှတ်ချက်")
+            self.discount_enabled.setText("လျှော့စျေးသုံးမည်")
+            for row in range(self.discount_group.layout().rowCount()):
+                label_item = self.discount_group.layout().itemAt(row, QFormLayout.ItemRole.LabelRole)
+                if label_item and isinstance(label_item.widget(), QLabel):
+                    text = label_item.widget().text()
+                    if "Discount Type:" in text:
+                        label_item.widget().setText("လျှော့စျေးအမျိုးအစား:")
+                    elif "Default Value:" in text:
+                        label_item.widget().setText("မူလတန်ဖိုး:")
+            self.discount_type_percent.setText("ရာခိုင်နှုန်း (%)")
+            self.discount_type_fixed.setText("သတ်မှတ်ပမာဏ ($)")
+            self.discount_type_manual.setText("လက်ဖြင့်ရိုက်ထည့်ရန်")
+            self.appearance_group.setTitle("အပြင်အဆင်")
+            self.follow_system_theme_check.setText("စနစ်၏အပြင်အဆင်ကို အလိုအလျောက်လိုက်ရန်")
+            self.btn_save.setText("သိမ်းဆည်းမည်")
+        else:
+            self.payment_group.setTitle("Payment Types")
+            self.payment_table.setHorizontalHeaderLabels(["ID", "Payment Method"])
+            self.btn_add_pay.setText("Add")
+            self.btn_edit_pay.setText("Edit")
+            self.btn_delete_pay.setText("Delete")
+            self.tax_group.setTitle("Tax Setting")
+            self.tax_enabled.setText("Enable Tax")
+            self.royalty_group.setTitle("Loyalty Settings")
+            for row in range(self.royalty_group.layout().rowCount()):
+                label_item = self.royalty_group.layout().itemAt(row, QFormLayout.ItemRole.LabelRole)
+                if label_item and isinstance(label_item.widget(), QLabel):
+                    text = label_item.widget().text()
+                    if "တစ်ဒေါ်လာလျှင်ရမည့်အမှတ်" in text:
+                        label_item.widget().setText("Points per $:")
+                    elif "ဆုချီးမြှင့်ရန်အနည်းဆုံးအမှတ်" in text:
+                        label_item.widget().setText("Minimum points for reward:")
+                    elif "ဆုလျှော့စျေးပမာဏ" in text:
+                        label_item.widget().setText("Reward discount amount:")
+                    elif "အမှတ်သက်တမ်းကုန်ရက်" in text:
+                        label_item.widget().setText("Points expiry (months, 0=never):")
+                    elif "တစ်အမှတ်တန်ဖိုး" in text:
+                        label_item.widget().setText("Value per point ($):")
+            self.discount_group.setTitle("Discount Setting")
+            self.discount_enabled.setText("Enable Discount")
+            for row in range(self.discount_group.layout().rowCount()):
+                label_item = self.discount_group.layout().itemAt(row, QFormLayout.ItemRole.LabelRole)
+                if label_item and isinstance(label_item.widget(), QLabel):
+                    text = label_item.widget().text()
+                    if "လျှော့စျေးအမျိုးအစား" in text:
+                        label_item.widget().setText("Discount Type:")
+                    elif "မူလတန်ဖိုး" in text:
+                        label_item.widget().setText("Default Value:")
+            self.discount_type_percent.setText("Percentage (%)")
+            self.discount_type_fixed.setText("Fixed Amount ($)")
+            self.discount_type_manual.setText("Manual (user enters any amount)")
+            self.appearance_group.setTitle("Appearance")
+            self.follow_system_theme_check.setText("Follow system theme (auto-switch)")
+            self.btn_save.setText("Save General Settings")
+
+    def on_follow_system_toggled(self, checked):
+        # Save to DB immediately
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE settings SET value = ? WHERE key = 'follow_system_theme'", ('1' if checked else '0'))
+        conn.commit()
+        conn.close()
+        # Emit signal so MainWindow can update menu states and apply theme
+        self.follow_system_theme_changed.emit(checked)
+
+    def load_appearance_settings(self):
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key='follow_system_theme'")
+        row = cursor.fetchone()
+        checked = row[0] == '1' if row else True
+        self.follow_system_theme_check.setChecked(checked)
+        
+        # Load saved theme
+        cursor.execute("SELECT value FROM settings WHERE key='theme'")
+        row = cursor.fetchone()
+        saved_theme = row[0] if row else "Light"
+        index = self.theme_combo.findText(saved_theme)
+        if index >= 0:
+            self.theme_combo.setCurrentIndex(index)
+        conn.close()
+
+    def save_settings(self):
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("UPDATE settings SET value=? WHERE key='tax_enabled'", ('1' if self.tax_enabled.isChecked() else '0',))
+        cursor.execute("UPDATE settings SET value=? WHERE key='tax_rate'", (str(self.tax_rate.value()),))
+        cursor.execute("UPDATE settings SET value=? WHERE key='loyalty_points_per_dollar'", (str(self.points_per_dollar.value()),))
+        cursor.execute("UPDATE settings SET value=? WHERE key='loyalty_min_points_for_reward'", (str(self.min_points.value()),))
+        cursor.execute("UPDATE settings SET value=? WHERE key='loyalty_reward_discount'", (str(self.reward_discount.value()),))
+        cursor.execute("UPDATE settings SET value=? WHERE key='points_expiry_months'", (str(self.points_expiry_months.value()),))
+        cursor.execute("UPDATE settings SET value=? WHERE key='points_dollar_value'", (str(self.points_dollar_value.value()),))
+        cursor.execute("UPDATE settings SET value=? WHERE key='discount_enabled'", ('1' if self.discount_enabled.isChecked() else '0',))
+        
+        if self.discount_type_percent.isChecked():
+            dtype = "percentage"
+        elif self.discount_type_fixed.isChecked():
+            dtype = "fixed"
+        else:
+            dtype = "manual"
+        cursor.execute("UPDATE settings SET value=? WHERE key='discount_type'", (dtype,))
+        cursor.execute("UPDATE settings SET value=? WHERE key='discount_value'", (str(self.discount_value.value()),))
+        
+        # Save theme setting
+        selected_theme = self.theme_combo.currentText()
+        cursor.execute("UPDATE settings SET value=? WHERE key='theme'", (selected_theme,))
+        
+        conn.commit()
+        conn.close()
+        
+        msg = "အထွေထွေသတ်မှတ်ချက်များ သိမ်းဆည်းပြီးပါပြီ။" if lang.get_current() == "my" else "General settings saved."
+        QMessageBox.information(self, "Saved", msg)
+        self.settings_saved.emit()
+
+    # ---------- Payment type methods ----------
+    def load_payment_types(self):
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, name FROM payment_types ORDER BY name")
+        rows = cursor.fetchall()
+        conn.close()
+        self.payment_table.setRowCount(0)
+        self.selected_payment_id = None
+        for row in rows:
+            r = self.payment_table.rowCount()
+            self.payment_table.insertRow(r)
+            self.payment_table.setItem(r, 0, QTableWidgetItem(str(row[0])))
+            self.payment_table.setItem(r, 1, QTableWidgetItem(row[1]))
+
+    def select_payment(self, row, col):
+        id_item = self.payment_table.item(row, 0)
+        if id_item:
+            self.selected_payment_id = int(id_item.text())
+
+    def add_payment_type(self):
+        dialog = PaymentTypeDialog()
+        if dialog.exec():
+            name = dialog.get_name()
+            if not name:
+                msg = "အမည်မဖြည့်နိုင်ပါ။" if lang.get_current() == "my" else "Name cannot be empty"
+                QMessageBox.warning(self, "Error", msg)
+                return
+            conn = connect_db()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("INSERT INTO payment_types (name) VALUES (?)", (name,))
+                conn.commit()
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Cannot add: {e}")
+            finally:
+                conn.close()
+            self.load_payment_types()
+            self.settings_saved.emit()
+
+    def edit_payment_type(self):
+        if not hasattr(self, 'selected_payment_id') or not self.selected_payment_id:
+            msg = "ကျေးဇူးပြု၍ ပြင်ဆင်လိုသော အမျိုးအစားကို ရွေးပါ။" if lang.get_current() == "my" else "Select a payment type first"
+            QMessageBox.warning(self, "No Selection", msg)
+            return
+        current_name = ""
+        for row in range(self.payment_table.rowCount()):
+            if int(self.payment_table.item(row, 0).text()) == self.selected_payment_id:
+                current_name = self.payment_table.item(row, 1).text()
+                break
+        dialog = PaymentTypeDialog(self.selected_payment_id, current_name)
+        if dialog.exec():
+            new_name = dialog.get_name()
+            if not new_name:
+                msg = "အမည်မဖြည့်နိုင်ပါ။" if lang.get_current() == "my" else "Name cannot be empty"
+                QMessageBox.warning(self, "Error", msg)
+                return
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("UPDATE payment_types SET name=? WHERE id=?", (new_name, self.selected_payment_id))
+            conn.commit()
+            conn.close()
+            self.load_payment_types()
+            self.settings_saved.emit()
+
+    def delete_payment_type(self):
+        if not hasattr(self, 'selected_payment_id') or not self.selected_payment_id:
+            msg = "ကျေးဇူးပြု၍ ဖျက်လိုသော အမျိုးအစားကို ရွေးပါ။" if lang.get_current() == "my" else "Select a payment type first"
+            QMessageBox.warning(self, "No Selection", msg)
+            return
+        confirm = "ဤငွေပေးချေမှုအမျိုးအစားကို ဖျက်မည်လား?" if lang.get_current() == "my" else "Delete this payment type?"
+        reply = QMessageBox.question(self, "Confirm Delete", confirm, QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            conn = connect_db()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM payment_types WHERE id=?", (self.selected_payment_id,))
+            conn.commit()
+            conn.close()
+            self.load_payment_types()
+            self.settings_saved.emit()
+
+    def load_tax_settings(self):
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key='tax_enabled'")
+        enabled = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='tax_rate'")
+        rate = cursor.fetchone()
+        conn.close()
+        self.tax_enabled.setChecked(enabled[0] == '1' if enabled else False)
+        self.tax_rate.setValue(float(rate[0]) if rate else 0.0)
+
+    def load_loyalty_settings(self):
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key='loyalty_points_per_dollar'")
+        points = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='loyalty_min_points_for_reward'")
+        min_pts = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='loyalty_reward_discount'")
+        discount = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='points_expiry_months'")
+        expiry = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='points_dollar_value'")
+        point_value = cursor.fetchone()
+        conn.close()
+        self.points_per_dollar.setValue(float(points[0]) if points else 0.0)
+        self.min_points.setValue(int(min_pts[0]) if min_pts else 100)
+        self.reward_discount.setValue(float(discount[0]) if discount else 5.0)
+        self.points_expiry_months.setValue(int(expiry[0]) if expiry else 12)
+        self.points_dollar_value.setValue(float(point_value[0]) if point_value else 0.01)
+
+    def load_discount_settings(self):
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT value FROM settings WHERE key='discount_enabled'")
+        enabled = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='discount_type'")
+        dtype = cursor.fetchone()
+        cursor.execute("SELECT value FROM settings WHERE key='discount_value'")
+        dvalue = cursor.fetchone()
+        conn.close()
+        self.discount_enabled.setChecked(enabled[0] == '1' if enabled else False)
+        discount_type = dtype[0] if dtype else "percentage"
+        if discount_type == "percentage":
+            self.discount_type_percent.setChecked(True)
+        elif discount_type == "fixed":
+            self.discount_type_fixed.setChecked(True)
+        else:
+            self.discount_type_manual.setChecked(True)
+        self.discount_value.setValue(float(dvalue[0]) if dvalue else 0.0)

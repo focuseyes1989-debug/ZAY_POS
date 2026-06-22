@@ -1,0 +1,18 @@
+# ui/settings/__init__.py
+from ui.settings.general_setting import GeneralSettingWidget
+from ui.settings.receipt_setting import ReceiptSettingWidget
+from ui.settings.regional_setting import RegionalSettingWidget
+from ui.settings.backup_reset_setting import BackupResetSettingWidget
+from ui.settings.users_setting import UsersSettingWidget
+from ui.settings.update_setting import UpdateSettingWidget  # New export
+from ui.settings.settings_page import SettingsPage
+
+__all__ = [
+    'GeneralSettingWidget',
+    'ReceiptSettingWidget', 
+    'RegionalSettingWidget',
+    'BackupResetSettingWidget',
+    'UsersSettingWidget',
+    'UpdateSettingWidget',  # New export
+    'SettingsPage'
+]

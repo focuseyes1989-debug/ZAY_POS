@@ -1,0 +1,62 @@
+from PyQt6.QtWidgets import QDialog, QFormLayout, QLineEdit, QPushButton, QMessageBox, QDialogButtonBox
+from models.database import connect_db
+import hashlib
+import os
+
+
+class ChangePasswordDialog(QDialog):
+    def __init__(self, user_id, username, parent=None):
+        super().__init__(parent)
+        self.user_id = user_id
+        self.username = username
+        self.setWindowTitle("Change Password")
+        self.setModal(True)
+        layout = QFormLayout()
+        self.old_password = QLineEdit()
+        self.old_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.new_password = QLineEdit()
+        self.new_password.setEchoMode(QLineEdit.EchoMode.Password)
+        self.confirm_password = QLineEdit()
+        self.confirm_password.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addRow("Current Password:", self.old_password)
+        layout.addRow("New Password:", self.new_password)
+        layout.addRow("Confirm New Password:", self.confirm_password)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.change_password)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+        self.setLayout(layout)
+
+    def change_password(self):
+        old = self.old_password.text()
+        new = self.new_password.text()
+        confirm = self.confirm_password.text()
+        if not old or not new:
+            QMessageBox.warning(self, "Error", "Please fill all fields.")
+            return
+        if new != confirm:
+            QMessageBox.warning(self, "Error", "New passwords do not match.")
+            return
+        conn = connect_db()
+        cursor = conn.cursor()
+        cursor.execute("SELECT password_hash, salt FROM users WHERE id=?", (self.user_id,))
+        stored_hash, salt = cursor.fetchone()
+        # Verify old password
+        if salt:
+            old_hash = hashlib.pbkdf2_hmac('sha256', old.encode(), bytes.fromhex(salt), 100000).hex()
+        else:
+            # fallback for old users (only for verification)
+            old_hash = hashlib.pbkdf2_hmac('sha256', old.encode(), b'salt_123', 100000).hex()
+        if old_hash != stored_hash:
+            QMessageBox.warning(self, "Error", "Current password is incorrect.")
+            conn.close()
+            return
+        # Generate new salt and hash
+        new_salt = os.urandom(32).hex()
+        new_hash = hashlib.pbkdf2_hmac('sha256', new.encode(), bytes.fromhex(new_salt), 100000).hex()
+        cursor.execute("UPDATE users SET password_hash=?, salt=?, force_password_change=0 WHERE id=?", 
+                       (new_hash, new_salt, self.user_id))
+        conn.commit()
+        conn.close()
+        QMessageBox.information(self, "Success", "Password changed successfully.")
+        self.accept()
