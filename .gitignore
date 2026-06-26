@@ -1,38 +1,18 @@
-# .gitignore
-
-# Database files (DO NOT COMMIT)
-database/*.db
-database/*.db-wal
-database/*.db-shm
-database/backups/*
-!database/.gitkeep
-
-# Logs
-logs/*.log
-logs/*.zip
-
-# Temp files
-temp/*
-*.tmp
-
-# Build files
+# Build Output
+update_build/
 build/
 dist/
-*.spec
-*.pyc
+
+# Executables
+*.exe
+*.zip
+
+# Python
 __pycache__/
+*.pyc
 
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-Thumbs.db
-.DS_Store
+# Database
+*.db
 
 # Environment
-venv/
-env/
 .env
