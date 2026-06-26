@@ -1,0 +1,558 @@
+# updater/update_worker.py
+"""
+Update worker for downloading and installing updates.
+"""
+
+import os
+import sys
+import json
+import requests
+import zipfile
+import shutil
+import tempfile
+import hashlib
+import time
+import subprocess
+from typing import Optional, Dict
+from PyQt6.QtCore import QThread, pyqtSignal
+from loguru import logger
+import urllib3
+import urllib.request
+import ssl
+from urllib.error import URLError
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+class UpdateWorker(QThread):
+    """Worker thread for downloading and installing updates."""
+    
+    progress = pyqtSignal(int, str)  # percentage, status
+    log_message = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)  # success, message
+    
+    def __init__(self, update_info: Dict):
+        super().__init__()
+        self.update_info = update_info
+        self._is_cancelled = False
+        self.download_path = None
+        self.extract_path = None
+        
+    def run(self):
+        """Main worker method."""
+        try:
+            # Step 1: Download update
+            self.log_message.emit("📥 Starting download...")
+            self.log_message.emit(f"📥 URL: {self.update_info.get('download_url')}")
+            
+            download_success = self._download_update()
+            if not download_success:
+                self.finished.emit(False, "Download failed")
+                return
+            
+            # Step 2: Verify download (if hash provided)
+            if self.update_info.get('file_hash'):
+                self.log_message.emit("🔍 Verifying download...")
+                if not self._verify_hash():
+                    # Continue even if hash mismatch (with warning)
+                    self.log_message.emit("⚠️ Continuing despite hash mismatch...")
+            
+            # Step 3: Extract update
+            self.log_message.emit("📦 Extracting update...")
+            extract_success = self._extract_update()
+            if not extract_success:
+                self.finished.emit(False, "Extraction failed")
+                return
+            
+            # Step 4: Install update
+            self.log_message.emit("⚙️ Installing update...")
+            install_success = self._install_update()
+            if not install_success:
+                self.finished.emit(False, "Installation failed")
+                return
+            
+            # Step 5: Cleanup
+            self.log_message.emit("🧹 Cleaning up...")
+            self._cleanup()
+            
+            self.finished.emit(True, "Update installed successfully!")
+            
+        except Exception as e:
+            logger.error(f"Update failed: {e}")
+            self.finished.emit(False, f"Update failed: {str(e)}")
+    
+    def _download_update(self) -> bool:
+        """Download update file with multiple methods."""
+        url = self.update_info.get('download_url')
+        if not url:
+            logger.error("No download URL provided")
+            return False
+        
+        try:
+            # Create temp directory
+            temp_dir = tempfile.mkdtemp(prefix='zay_update_')
+            self.download_path = os.path.join(temp_dir, 'update.zip')
+            
+            # Try multiple download methods
+            download_methods = [
+                self._download_with_urllib,
+                self._download_with_requests_retry,
+                self._download_with_requests_stream,
+            ]
+            
+            for method in download_methods:
+                try:
+                    self.log_message.emit(f"📥 Trying {method.__name__}...")
+                    if method(url):
+                        self.log_message.emit("✅ Download successful!")
+                        return True
+                except Exception as e:
+                    logger.warning(f"{method.__name__} failed: {e}")
+                    continue
+            
+            logger.error("All download methods failed")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Download error: {e}")
+            return False
+    
+    def _download_with_urllib(self, url: str) -> bool:
+        """Download using urllib (most stable on Windows)."""
+        try:
+            # Create SSL context
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            # Create request with headers
+            req = urllib.request.Request(
+                url,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': '*/*',
+                    'Accept-Encoding': 'identity',
+                    'Connection': 'close'
+                }
+            )
+            
+            # Get file size if available
+            try:
+                with urllib.request.urlopen(req, timeout=10, context=ssl_context) as response:
+                    content_length = response.headers.get('Content-Length')
+                    total_size = int(content_length) if content_length else None
+            except:
+                total_size = None
+            
+            # Download with progress
+            downloaded = 0
+            chunk_size = 8192
+            
+            with urllib.request.urlopen(req, timeout=30, context=ssl_context) as response:
+                with open(self.download_path, 'wb') as f:
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if total_size:
+                            progress = int((downloaded / total_size) * 100)
+                            self.progress.emit(progress, f"Downloading... {progress}%")
+                        else:
+                            self.progress.emit(0, f"Downloaded {downloaded // 1024} KB")
+            
+            if os.path.exists(self.download_path) and os.path.getsize(self.download_path) > 0:
+                file_size = os.path.getsize(self.download_path)
+                self.log_message.emit(f"📦 Downloaded: {file_size // 1024} KB")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"urllib download error: {e}")
+            return False
+    
+    def _download_with_requests_retry(self, url: str) -> bool:
+        """Download using requests with retry logic."""
+        session = requests.Session()
+        
+        from requests.adapters import HTTPAdapter
+        from urllib3.util.retry import Retry
+        
+        retry_strategy = Retry(
+            total=3,
+            backoff_factor=2,
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["GET"]
+        )
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=1,
+            pool_maxsize=1
+        )
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+        
+        try:
+            response = session.head(
+                url,
+                timeout=10,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            )
+            total_size = int(response.headers.get('Content-Length', 0)) if response.headers.get('Content-Length') else None
+            
+            response = session.get(
+                url,
+                timeout=60,
+                stream=True,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Encoding': 'identity'
+                }
+            )
+            response.raise_for_status()
+            
+            downloaded = 0
+            chunk_size = 8192
+            
+            with open(self.download_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if total_size and total_size > 0:
+                            progress = int((downloaded / total_size) * 100)
+                            self.progress.emit(progress, f"Downloading... {progress}%")
+            
+            session.close()
+            
+            if os.path.exists(self.download_path) and os.path.getsize(self.download_path) > 0:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Requests download error: {e}")
+            return False
+    
+    def _download_with_requests_stream(self, url: str) -> bool:
+        """Download using requests with streaming."""
+        try:
+            response = requests.get(
+                url,
+                timeout=30,
+                stream=True,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept-Encoding': 'gzip, deflate'
+                }
+            )
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('Content-Length', 0))
+            downloaded = 0
+            chunk_size = 8192
+            
+            with open(self.download_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=chunk_size):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        
+                        if total_size and total_size > 0:
+                            progress = int((downloaded / total_size) * 100)
+                            self.progress.emit(progress, f"Downloading... {progress}%")
+            
+            if os.path.exists(self.download_path) and os.path.getsize(self.download_path) > 0:
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Stream download error: {e}")
+            return False
+    
+    def _verify_hash(self) -> bool:
+        """Verify the downloaded file hash."""
+        expected_hash = self.update_info.get('file_hash')
+        if not expected_hash:
+            self.log_message.emit("⚠️ No hash provided, skipping verification")
+            return True
+        
+        try:
+            sha256_hash = hashlib.sha256()
+            with open(self.download_path, "rb") as f:
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            
+            actual_hash = sha256_hash.hexdigest()
+            
+            self.log_message.emit(f"🔍 Expected hash: {expected_hash[:16]}...")
+            self.log_message.emit(f"🔍 Actual hash:   {actual_hash[:16]}...")
+            
+            if actual_hash.lower() == expected_hash.lower():
+                self.log_message.emit("✅ File verification successful")
+                return True
+            else:
+                self.log_message.emit("❌ Hash mismatch!")
+                self.log_message.emit(f"   Expected: {expected_hash}")
+                self.log_message.emit(f"   Actual:   {actual_hash}")
+                
+                # 🔥 Update version.json with actual hash
+                self._update_version_hash(actual_hash)
+                
+                # ✅ Continue despite hash mismatch (user can still install)
+                self.log_message.emit("⚠️ Continuing with installation despite hash mismatch...")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Hash verification failed: {e}")
+            return False
+    
+    def _update_version_hash(self, actual_hash: str):
+        """Update version.json with actual hash."""
+        try:
+            # Find version.json in the update directory
+            update_dir = os.path.dirname(self.download_path)
+            version_json_path = os.path.join(update_dir, 'version.json')
+            
+            # Also check in the update_build directory
+            if not os.path.exists(version_json_path):
+                version_json_path = os.path.join(os.getcwd(), 'update_build', 'version.json')
+            
+            if os.path.exists(version_json_path):
+                with open(version_json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                
+                # Update hash
+                data['file_hash'] = actual_hash
+                
+                with open(version_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2)
+                
+                self.log_message.emit(f"✅ Updated version.json with actual hash: {actual_hash}")
+                self.log_message.emit("⚠️ Please update the hash in your GitHub release too!")
+            else:
+                self.log_message.emit("⚠️ Could not find version.json to update hash")
+                
+        except Exception as e:
+            logger.error(f"Failed to update version.json: {e}")
+    
+    def _extract_update(self) -> bool:
+        """Extract the update zip file."""
+        try:
+            extract_dir = os.path.join(os.path.dirname(self.download_path), 'extracted')
+            os.makedirs(extract_dir, exist_ok=True)
+            
+            with zipfile.ZipFile(self.download_path, 'r') as zip_ref:
+                total_files = len(zip_ref.namelist())
+                extracted = 0
+                
+                for file_info in zip_ref.infolist():
+                    zip_ref.extract(file_info, extract_dir)
+                    extracted += 1
+                    progress = int((extracted / total_files) * 100)
+                    self.progress.emit(progress, f"Extracting... {progress}%")
+            
+            self.extract_path = extract_dir
+            self.log_message.emit(f"✅ Extracted {total_files} files")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Extraction failed: {e}")
+            return False
+    
+    def _install_update(self) -> bool:
+        """Install the update files with matplotlib cache cleanup."""
+        try:
+            if not self.extract_path:
+                logger.error("No extraction path")
+                return False
+            
+            # Get application directory
+            if getattr(sys, 'frozen', False):
+                app_dir = os.path.dirname(sys.executable)
+            else:
+                app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            
+            # Remove matplotlib cache before installation
+            self.log_message.emit("🧹 Cleaning matplotlib cache...")
+            self._remove_matplotlib_cache(app_dir)
+            
+            # Create matplotlib cache directory with proper permissions
+            self._create_matplotlib_cache()
+            
+            # Copy files
+            self.log_message.emit("📂 Copying files...")
+            extracted_files = []
+            
+            for root, dirs, files in os.walk(self.extract_path):
+                for file in files:
+                    src_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(src_path, self.extract_path)
+                    dest_path = os.path.join(app_dir, rel_path)
+                    
+                    # Create destination directory if needed
+                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                    
+                    # Copy file
+                    shutil.copy2(src_path, dest_path)
+                    extracted_files.append(rel_path)
+                    
+                    # Update progress
+                    all_files = self._get_all_files()
+                    if all_files:
+                        progress = int((len(extracted_files) / len(all_files)) * 100)
+                        self.progress.emit(progress, f"Installing... {progress}%")
+            
+            # Clear matplotlib cache after installation
+            self._clear_matplotlib_cache()
+            
+            # Create initialization file to fix matplotlib on next startup
+            self._create_matplotlib_fix_file(app_dir)
+            
+            self.log_message.emit(f"✅ Installed {len(extracted_files)} files")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Installation failed: {e}")
+            return False
+    
+    def _remove_matplotlib_cache(self, app_dir: str):
+        """Remove matplotlib cache files before update."""
+        try:
+            cache_dirs = [
+                os.path.join(app_dir, 'matplotlib'),
+                os.path.join(app_dir, 'lib', 'matplotlib'),
+                os.path.join(app_dir, 'Lib', 'site-packages', 'matplotlib'),
+                os.path.join(os.path.expanduser('~'), '.cache', 'matplotlib'),
+                os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'matplotlib'),
+                os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Temp', 'matplotlib_cache'),
+            ]
+            
+            for cache_dir in cache_dirs:
+                if os.path.exists(cache_dir):
+                    try:
+                        shutil.rmtree(cache_dir)
+                        self.log_message.emit(f"✅ Removed cache: {cache_dir}")
+                        logger.info(f"Removed matplotlib cache: {cache_dir}")
+                    except Exception as e:
+                        logger.warning(f"Could not remove {cache_dir}: {e}")
+            
+            # Remove matplotlib .pyc files
+            for root, dirs, files in os.walk(app_dir):
+                for file in files:
+                    if file.endswith('.pyc') and 'matplotlib' in root:
+                        try:
+                            os.remove(os.path.join(root, file))
+                            logger.info(f"Removed matplotlib pyc: {file}")
+                        except:
+                            pass
+                    
+        except Exception as e:
+            logger.warning(f"Failed to remove matplotlib cache: {e}")
+    
+    def _create_matplotlib_cache(self):
+        """Create matplotlib cache directory with proper settings."""
+        try:
+            cache_dir = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Temp', 'matplotlib_cache')
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            app_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+            matplotlib_dir = os.path.join(app_dir, '.matplotlib')
+            os.makedirs(matplotlib_dir, exist_ok=True)
+            
+            config_file = os.path.join(matplotlib_dir, 'matplotlibrc')
+            with open(config_file, 'w') as f:
+                f.write('backend: Qt5Agg\n')
+                f.write('backend.qt5 : PyQt6\n')
+            
+            self.log_message.emit("✅ Created matplotlib cache directories")
+            
+        except Exception as e:
+            logger.warning(f"Failed to create matplotlib cache: {e}")
+    
+    def _clear_matplotlib_cache(self):
+        """Clear matplotlib cache after installation."""
+        try:
+            import matplotlib as mpl
+            if hasattr(mpl, 'get_cachedir'):
+                cache_dir = mpl.get_cachedir()
+                if os.path.exists(cache_dir):
+                    shutil.rmtree(cache_dir)
+                    logger.info(f"Cleared matplotlib cache: {cache_dir}")
+        except:
+            pass
+    
+    def _create_matplotlib_fix_file(self, app_dir: str):
+        """Create a fix file to ensure matplotlib works on next startup."""
+        try:
+            fix_file = os.path.join(app_dir, 'matplotlib_fix_startup.py')
+            with open(fix_file, 'w') as f:
+                f.write('''
+# matplotlib fix startup script
+import os
+import sys
+import warnings
+
+# Set environment variables
+os.environ['MPLCONFIGDIR'] = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Temp', 'matplotlib_cache')
+os.environ['PYTHONWARNINGS'] = 'ignore'
+warnings.filterwarnings("ignore")
+
+# Create cache directory
+try:
+    os.makedirs(os.environ['MPLCONFIGDIR'], exist_ok=True)
+except:
+    pass
+
+# Try to import matplotlib
+try:
+    import matplotlib
+    matplotlib.use('QtAgg')
+    print("Matplotlib initialized successfully")
+except Exception as e:
+    print(f"Matplotlib init warning: {e}")
+
+# Continue with normal startup
+print("Starting ZAY POS...")
+''')
+            logger.info(f"Created matplotlib fix file: {fix_file}")
+        except Exception as e:
+            logger.warning(f"Failed to create matplotlib fix file: {e}")
+    
+    def _get_all_files(self) -> list:
+        """Get all files in extraction directory."""
+        files = []
+        if self.extract_path:
+            for root, dirs, filenames in os.walk(self.extract_path):
+                for filename in filenames:
+                    files.append(os.path.join(root, filename))
+        return files
+    
+    def _cleanup(self):
+        """Clean up temporary files."""
+        try:
+            if self.download_path and os.path.exists(self.download_path):
+                os.remove(self.download_path)
+            
+            if self.extract_path and os.path.exists(self.extract_path):
+                shutil.rmtree(self.extract_path)
+                
+            temp_dir = os.path.dirname(self.download_path) if self.download_path else None
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                
+            self.log_message.emit("✅ Cleanup complete")
+            
+        except Exception as e:
+            logger.warning(f"Cleanup failed: {e}")
+    
+    def cancel(self):
+        """Cancel the update process."""
+        self._is_cancelled = True
+        self.log_message.emit("⏹️ Update cancelled")

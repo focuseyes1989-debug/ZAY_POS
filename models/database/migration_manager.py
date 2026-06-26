@@ -258,6 +258,29 @@ class MigrationManager:
         self.conn.commit()
         logger.info(f"Migration rolled back: {migration.version} - {migration.name}")
     
+    # ============================================================
+    # ✅ FIX: get_failed_migrations method (was missing)
+    # ============================================================
+    def get_failed_migrations(self) -> List[Dict]:
+        """
+        Get list of failed migrations.
+        
+        Returns:
+            List[Dict]: List of failed migrations with details
+        """
+        try:
+            self.cursor.execute(f"""
+                SELECT version, name, error_message, applied_at
+                FROM {MIGRATION_TABLE}
+                WHERE status = 'failed'
+                ORDER BY id DESC
+            """)
+            columns = ['version', 'name', 'error', 'applied_at']
+            return [dict(zip(columns, row)) for row in self.cursor.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to get failed migrations: {e}")
+            return []
+    
     def column_exists(self, table: str, column: str) -> bool:
         """Check if column exists."""
         try:
@@ -596,14 +619,3 @@ def get_latest_version(versions: List[str]) -> Optional[str]:
     if not versions:
         return None
     return max(versions, key=lambda v: Version(v))
-
-def get_failed_migrations(self) -> List[Dict]:
-    """Get list of failed migrations."""
-    self.cursor.execute(f"""
-        SELECT version, name, error_message, applied_at
-        FROM {MIGRATION_TABLE}
-        WHERE status = 'failed'
-        ORDER BY id DESC
-    """)
-    columns = ['version', 'name', 'error', 'applied_at']
-    return [dict(zip(columns, row)) for row in self.cursor.fetchall()]

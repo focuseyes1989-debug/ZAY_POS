@@ -11,6 +11,7 @@ from utils.language import lang
 from utils.permissions import PermissionManager, Permission
 from loguru import logger
 import os
+import sys
 import shutil
 import sqlite3
 import tempfile
@@ -19,10 +20,25 @@ from datetime import datetime
 import time
 
 
-DB_PATH = "database/pos.db"
-PRODUCT_IMAGES_DIR = "database/product_images"
+# ========== DATABASE PATH FIX ==========
+def get_db_path():
+    """Get database path for both development and packaged EXE."""
+    if getattr(sys, 'frozen', False):
+        # Running as compiled EXE
+        return os.path.join(os.path.dirname(sys.executable), 'database', 'pos.db')
+    else:
+        # Running as Python script
+        return "database/pos.db"
+
+
+DB_PATH = get_db_path()
+PRODUCT_IMAGES_DIR = os.path.join(os.path.dirname(DB_PATH), 'product_images')
 BACKUP_DB_NAME = "pos.db"
 BACKUP_IMAGES_DIR = "product_images"
+
+# Log the path for debugging
+logger.info(f"Database path: {DB_PATH}")
+logger.info(f"Product images path: {PRODUCT_IMAGES_DIR}")
 
 
 def _database_sidecar_paths(db_path):
@@ -45,21 +61,32 @@ def _ensure_database_exists():
 def _force_close_all_connections():
     """Force close all database connections and wait for release."""
     logger.info("Force closing all database connections...")
+    
+    # Close all connections from pool
     close_all_connections()
-    time.sleep(0.3)
+    
+    # Wait for connections to be released
+    time.sleep(0.5)
+    
+    # Garbage collection
     import gc
     gc.collect()
     
+    # Try to close any remaining connections
     if os.path.exists(DB_PATH):
         try:
             conn = sqlite3.connect(DB_PATH, timeout=1)
             conn.close()
         except:
             pass
+    
+    # Wait again
+    time.sleep(0.3)
+    
     logger.info("All connections closed.")
 
 
-def _wait_for_file_release(file_path, max_wait=3):
+def _wait_for_file_release(file_path, max_wait=5):
     """Wait for a file to be released by the OS."""
     for i in range(max_wait * 10):
         try:
@@ -105,7 +132,88 @@ def _ensure_backup_extension(file_path):
     return f"{file_path}.zaybackup"
 
 
+def _make_path_portable(image_path, product_images_dir):
+    """
+    Convert an absolute image path to a portable relative path.
+    
+    Args:
+        image_path: Original image path from database
+        product_images_dir: Directory where product images are stored
+    
+    Returns:
+        Portable relative path (e.g., "database/product_images/abc123.jpg")
+    """
+    if not image_path:
+        return image_path
+    
+    # If already relative, keep it
+    if not os.path.isabs(image_path):
+        # Check if it's already in the correct format
+        if 'product_images' in image_path or 'database/product_images' in image_path:
+            return image_path
+        # Otherwise, try to make it relative
+        return os.path.join('database', 'product_images', os.path.basename(image_path))
+    
+    # Convert absolute to relative
+    try:
+        # Check if image is in product_images directory
+        if os.path.dirname(image_path) == product_images_dir:
+            # Just use filename
+            return os.path.join('database', 'product_images', os.path.basename(image_path))
+        
+        # Check if image is inside product_images_dir (subfolders)
+        if product_images_dir in image_path:
+            rel_path = os.path.relpath(image_path, os.path.dirname(product_images_dir))
+            return rel_path.replace('\\', '/')
+        
+        # Image is outside product_images_dir - copy it during restore
+        # For now, just use the filename
+        return os.path.join('database', 'product_images', os.path.basename(image_path))
+        
+    except Exception as e:
+        logger.warning(f"Could not make path portable: {image_path} -> {e}")
+        return image_path
+
+
+def _fix_image_paths_in_db(db_path, product_images_dir):
+    """
+    Fix image paths in database to be relative (portable).
+    This ensures images work on any computer after restore.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        # Get all products with image paths
+        cursor.execute("SELECT id, image FROM products WHERE image IS NOT NULL AND image != ''")
+        products = cursor.fetchall()
+        
+        updated_count = 0
+        for product_id, image_path in products:
+            if not image_path:
+                continue
+            
+            # Convert to relative path
+            relative_path = _make_path_portable(image_path, product_images_dir)
+            
+            if relative_path != image_path:
+                cursor.execute("UPDATE products SET image = ? WHERE id = ?", (relative_path, product_id))
+                updated_count += 1
+        
+        if updated_count > 0:
+            conn.commit()
+            logger.info(f"Fixed {updated_count} image paths to portable format")
+        
+        conn.close()
+        return updated_count
+        
+    except Exception as e:
+        logger.error(f"Failed to fix image paths: {e}")
+        return 0
+
+
 def _create_backup_package(backup_path, db_path=DB_PATH, product_images_dir=PRODUCT_IMAGES_DIR):
+    """Create backup package with portable image paths."""
     backup_path = _ensure_backup_extension(backup_path)
 
     if os.path.splitext(backup_path)[1].lower() == ".db":
@@ -120,6 +228,9 @@ def _create_backup_package(backup_path, db_path=DB_PATH, product_images_dir=PROD
         temp_db = os.path.join(tmp_dir, BACKUP_DB_NAME)
         _backup_database_file(db_path, temp_db)
 
+        # Fix: Update image paths in database to relative paths BEFORE backup
+        _fix_image_paths_in_db(temp_db, product_images_dir)
+
         with zipfile.ZipFile(backup_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
             archive.write(temp_db, BACKUP_DB_NAME)
 
@@ -133,23 +244,185 @@ def _create_backup_package(backup_path, db_path=DB_PATH, product_images_dir=PROD
     return backup_path
 
 
+def _find_image_file(search_dir, filename):
+    """
+    Recursively search for an image file in a directory.
+    
+    Args:
+        search_dir: Directory to search in
+        filename: Filename to find
+    
+    Returns:
+        Full path to the file if found, None otherwise
+    """
+    if not os.path.isdir(search_dir):
+        return None
+    
+    for root, _, files in os.walk(search_dir):
+        if filename in files:
+            return os.path.join(root, filename)
+    
+    return None
+
+
+def _fix_image_paths_for_restore(db_path, product_images_dir):
+    """
+    Fix image paths in database for the new computer.
+    Keep relative paths as-is (they work with app_path()).
+    Only fix absolute paths that don't exist.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id, image FROM products WHERE image IS NOT NULL AND image != ''")
+        products = cursor.fetchall()
+        
+        updated_count = 0
+        for product_id, image_path in products:
+            if not image_path:
+                continue
+            
+            # Get just the filename
+            filename = os.path.basename(image_path)
+            
+            # Case 1: Path is relative - keep it as is
+            if not os.path.isabs(image_path):
+                # Check if image exists in product_images_dir
+                expected_path = os.path.join(product_images_dir, filename)
+                
+                # If image doesn't exist at expected path, try to find it
+                if not os.path.exists(expected_path):
+                    found_path = _find_image_file(product_images_dir, filename)
+                    if found_path:
+                        # Update to absolute path since we found it
+                        cursor.execute("UPDATE products SET image = ? WHERE id = ?", (found_path, product_id))
+                        updated_count += 1
+                        logger.info(f"Found missing image '{filename}' at: {found_path}")
+                    else:
+                        logger.warning(f"Image file not found: {filename}")
+                # else: file exists, keep relative path
+                continue
+            
+            # Case 2: Path is absolute and file exists - keep it
+            if os.path.exists(image_path):
+                continue
+            
+            # Case 3: Path is absolute but file doesn't exist - try to find it
+            found_path = _find_image_file(product_images_dir, filename)
+            if found_path:
+                cursor.execute("UPDATE products SET image = ? WHERE id = ?", (found_path, product_id))
+                updated_count += 1
+                logger.info(f"Fixed missing image path for product {product_id}: {found_path}")
+            else:
+                # Try relative path as fallback
+                rel_path = os.path.join('database', 'product_images', filename).replace('\\', '/')
+                # Check if the file exists in product_images_dir
+                if os.path.exists(os.path.join(product_images_dir, filename)):
+                    cursor.execute("UPDATE products SET image = ? WHERE id = ?", (rel_path, product_id))
+                    updated_count += 1
+                    logger.info(f"Using relative path: {rel_path}")
+                else:
+                    logger.warning(f"Image file not found: {filename}")
+        
+        if updated_count > 0:
+            conn.commit()
+            logger.info(f"Fixed {updated_count} image paths for current computer")
+        
+        conn.close()
+        return updated_count
+        
+    except Exception as e:
+        logger.error(f"Failed to fix image paths for restore: {e}")
+        return 0
+
+
+def _verify_image_paths(db_path, product_images_dir):
+    """
+    Verify all image paths in database exist on disk.
+    Logs warnings for missing images.
+    """
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT id, name, image FROM products WHERE image IS NOT NULL AND image != ''")
+        products = cursor.fetchall()
+        conn.close()
+        
+        missing_count = 0
+        for product_id, name, image_path in products:
+            if not image_path:
+                continue
+            
+            # Check if path exists (absolute or relative)
+            if not os.path.exists(image_path):
+                # Try relative path resolution
+                from utils.paths import app_path
+                resolved = app_path(image_path)
+                if not os.path.exists(resolved):
+                    logger.warning(f"Missing image for product '{name}': {image_path}")
+                    missing_count += 1
+                else:
+                    # Update to absolute path
+                    try:
+                        conn2 = sqlite3.connect(db_path)
+                        cursor2 = conn2.cursor()
+                        cursor2.execute("UPDATE products SET image = ? WHERE id = ?", (resolved, product_id))
+                        conn2.commit()
+                        conn2.close()
+                        logger.info(f"Fixed image path for '{name}': {resolved}")
+                    except Exception as e:
+                        logger.error(f"Failed to update image path: {e}")
+        
+        if missing_count > 0:
+            logger.warning(f"Found {missing_count} products with missing images")
+        else:
+            logger.info("All product images verified")
+        
+        return missing_count
+        
+    except Exception as e:
+        logger.error(f"Image verification failed: {e}")
+        return -1
+
+
 def _restore_backup_package(backup_path, db_path=DB_PATH, product_images_dir=PRODUCT_IMAGES_DIR):
+    """Restore backup package and fix image paths."""
     if not os.path.exists(backup_path):
         raise FileNotFoundError(f"Backup file not found: {backup_path}")
     
+    # Step 1: Force close ALL connections
+    logger.info("Step 1: Closing all database connections...")
     _force_close_all_connections()
     
+    # Step 2: Wait for file to be released
     if os.path.exists(db_path):
-        _wait_for_file_release(db_path, max_wait=3)
+        logger.info("Step 2: Waiting for file release...")
+        if not _wait_for_file_release(db_path, max_wait=5):
+            logger.warning("Could not release database file, but continuing...")
     
+    # Step 3: Ensure directory exists
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
     
+    # Step 4: Remove sidecar files first
+    logger.info("Step 3: Removing sidecar files...")
     for sidecar in _database_sidecar_paths(db_path):
         if os.path.exists(sidecar):
             try:
                 os.remove(sidecar)
-            except:
-                pass
+                logger.info(f"Removed sidecar file: {sidecar}")
+            except PermissionError:
+                logger.warning(f"Could not remove sidecar file (in use): {sidecar}")
+                time.sleep(0.5)
+                try:
+                    os.remove(sidecar)
+                    logger.info(f"Removed sidecar file after retry: {sidecar}")
+                except Exception as e:
+                    logger.warning(f"Could not remove sidecar file: {e}")
+    
+    # Step 5: Restore from backup
+    logger.info("Step 4: Restoring from backup...")
     
     if zipfile.is_zipfile(backup_path):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -165,19 +438,51 @@ def _restore_backup_package(backup_path, db_path=DB_PATH, product_images_dir=PRO
                 raise FileNotFoundError(f"Extracted database not found: {extracted_db}")
             
             _validate_database_file(extracted_db)
+            
+            # Fix: Update image paths for new computer BEFORE restore
+            _fix_image_paths_for_restore(extracted_db, product_images_dir)
+            
             _restore_database_file(extracted_db, db_path)
 
             extracted_images = os.path.join(tmp_dir, BACKUP_IMAGES_DIR)
             if os.path.isdir(extracted_images):
-                if os.path.isdir(product_images_dir):
-                    shutil.rmtree(product_images_dir)
-                os.makedirs(os.path.dirname(product_images_dir), exist_ok=True)
-                shutil.copytree(extracted_images, product_images_dir)
+                # Ensure product_images directory exists
+                os.makedirs(product_images_dir, exist_ok=True)
+                
+                # Copy images with overwrite
+                for root, _, files in os.walk(extracted_images):
+                    for filename in files:
+                        src = os.path.join(root, filename)
+                        rel = os.path.relpath(src, extracted_images)
+                        dst = os.path.join(product_images_dir, rel)
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        shutil.copy2(src, dst)
+                        logger.info(f"Restored image: {rel}")
             else:
                 os.makedirs(product_images_dir, exist_ok=True)
     else:
         _validate_database_file(backup_path)
+        _fix_image_paths_for_restore(backup_path, product_images_dir)
         _restore_database_file(backup_path, db_path)
+    
+    # Step 6: Final image path verification and fixing
+    logger.info("Step 5: Verifying and fixing image paths...")
+    _verify_image_paths(db_path, product_images_dir)
+    
+    # Step 7: Verify restore
+    logger.info("Step 6: Verifying restore...")
+    if os.path.exists(db_path):
+        try:
+            conn = sqlite3.connect(db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+            count = cursor.fetchone()[0]
+            conn.close()
+            logger.info(f"Restore verified: {count} tables found")
+        except Exception as e:
+            logger.error(f"Restore verification failed: {e}")
+    
+    logger.info("Restore completed successfully!")
 
 
 def _validate_database_file(file_path):
@@ -216,43 +521,78 @@ def _restore_database_file(backup_path, db_path=DB_PATH):
     _validate_database_file(backup_path)
 
     os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    
+    # Force close connections again before copy
     _force_close_all_connections()
     
     if os.path.exists(db_path):
-        _wait_for_file_release(db_path, max_wait=3)
+        _wait_for_file_release(db_path, max_wait=5)
 
+    # Backup current database if exists
     if os.path.exists(db_path):
         temp_backup = os.path.join(os.path.dirname(db_path), "pos_backup_before_restore.db")
         try:
             _backup_database_file(db_path, temp_backup)
-        except:
-            pass
+            logger.info(f"Created backup of current database at: {temp_backup}")
+        except Exception as e:
+            logger.warning(f"Could not create backup of current database: {e}")
 
+    # Remove WAL sidecar files with retry
     for sidecar in _database_sidecar_paths(db_path):
         if os.path.exists(sidecar):
             try:
                 os.remove(sidecar)
-            except:
-                pass
+                logger.info(f"Removed sidecar file: {sidecar}")
+            except PermissionError:
+                logger.warning(f"Could not remove sidecar file (in use), retrying...: {sidecar}")
+                time.sleep(1)
+                try:
+                    os.remove(sidecar)
+                    logger.info(f"Removed sidecar file after retry: {sidecar}")
+                except Exception as e:
+                    logger.warning(f"Could not remove sidecar file: {e}")
 
-    retry_count = 3
+    # Copy backup to target with retry
+    retry_count = 5
     for i in range(retry_count):
         try:
+            # First try: direct copy
             shutil.copy2(backup_path, db_path)
+            logger.info(f"Restored database from: {backup_path} to: {db_path}")
             break
-        except PermissionError:
+        except PermissionError as e:
             if i < retry_count - 1:
-                time.sleep(0.5)
+                logger.warning(f"Copy failed (attempt {i+1}/{retry_count}), retrying...")
+                time.sleep(1)
                 _force_close_all_connections()
             else:
                 raise PermissionError(f"Could not restore database: {e}")
+        except Exception as e:
+            if i < retry_count - 1:
+                logger.warning(f"Copy failed (attempt {i+1}/{retry_count}): {e}")
+                time.sleep(1)
+            else:
+                raise
 
+    # Remove any WAL sidecar files that might have been created during copy
     for sidecar in _database_sidecar_paths(db_path):
         if os.path.exists(sidecar):
             try:
                 os.remove(sidecar)
+                logger.info(f"Removed sidecar file after restore: {sidecar}")
             except:
                 pass
+    
+    # Verify the restored database
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+        table_count = cursor.fetchone()[0]
+        conn.close()
+        logger.info(f"Restored database verified: {table_count} tables found")
+    except Exception as e:
+        logger.error(f"Restored database verification failed: {e}")
 
 
 # ========== WORKER THREADS WITH PROPER PROGRESS ==========
@@ -308,15 +648,35 @@ class RestoreWorker(QThread):
             
             self.progress.emit(10, "Closing database connections...")
             _force_close_all_connections()
-            time.sleep(0.2)
+            time.sleep(0.5)
+            
+            self.progress.emit(15, "Removing sidecar files...")
+            for sidecar in _database_sidecar_paths(DB_PATH):
+                if os.path.exists(sidecar):
+                    try:
+                        os.remove(sidecar)
+                    except:
+                        pass
             
             self.progress.emit(20, "Restoring database...")
             
             # Restore with progress
             _restore_backup_package(self.restore_path)
             
-            self.progress.emit(90, "Finalizing...")
-            time.sleep(0.1)
+            self.progress.emit(90, "Verifying restore...")
+            time.sleep(0.2)
+            
+            # Verify after restore
+            if os.path.exists(DB_PATH):
+                try:
+                    conn = sqlite3.connect(DB_PATH)
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'")
+                    count = cursor.fetchone()[0]
+                    conn.close()
+                    logger.info(f"Restore verified: {count} tables found")
+                except Exception as e:
+                    logger.error(f"Verification failed: {e}")
             
             self.progress.emit(100, "Restore completed!")
             self.finished.emit(True, "Restore completed successfully")
@@ -704,12 +1064,24 @@ class BackupResetSettingWidget(QWidget):
         self.btn_restore.setEnabled(True)
         
         if success:
+            # Verify database after restore
+            try:
+                from models.database import connect_db
+                conn = connect_db()
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM settings")
+                count = cursor.fetchone()[0]
+                conn.close()
+                logger.info(f"Database verified after restore: {count} settings found")
+            except Exception as e:
+                logger.error(f"Database verification failed: {e}")
+            
             QMessageBox.information(
                 self,
                 "Restore Complete" if lang.get_current() != "my" else "Restore ပြီးပါပြီ",
-                "Database restored. The application will now close.\nPlease restart manually."
+                "Database restored successfully.\n\nThe application will now close.\nPlease restart manually."
                 if lang.get_current() != "my" else
-                "Database ပြန်လည် restore ပြီးပါပြီ။ Application ပိတ်သွားပါမည်။ ကျေးဇူးပြု၍ ပြန်ဖွင့်ပါ။"
+                "Database ပြန်လည် restore ပြီးပါပြီ။\n\nApplication ပိတ်သွားပါမည်။\nကျေးဇူးပြု၍ ပြန်ဖွင့်ပါ။"
             )
             import sys
             sys.exit(0)
@@ -910,7 +1282,10 @@ class BackupInfoDialog(QDialog):
         if lang_code == "my":
             self.setWindowTitle("Backup ဖိုင်သိမ်းဆည်းပြီးပါပြီ")
             self.title_text.setText("Factory Reset အောင်မြင်စွာ ပြီးဆုံးပါပြီ!")
-            backup_label.setText("Backup ဖိုင်သိမ်းဆည်းရာနေရာ:")
+            backup_label = self.findChild(QLabel, "backup_label")
+            if not backup_label:
+                backup_label = QLabel("Backup ဖိုင်သိမ်းဆည်းရာနေရာ:")
+                backup_label.setStyleSheet("font-weight: bold;")
             self.btn_open_folder.setText("Backup ဖိုင်တွဲဖွင့်ရန်")
             self.btn_close.setText("Application ပိတ်ရန်")
     
@@ -1014,9 +1389,12 @@ class ConfirmResetDialog(QDialog):
         if lang_code == "my":
             self.setWindowTitle("Factory Reset အတည်ပြုရန်")
             self.warning_text.setText("သတိပေးချက်: ဤလုပ်ဆောင်ချက်ကို နောက်ပြန်မလှန်နိုင်ပါ!")
-            delete_group.setTitle("အောက်ပါဒေတာများ အပြီးတိုင်ဖျက်ပစ်မည်:")
-            keep_group.setTitle("အောက်ပါအချက်များ ထိန်းသိမ်းမည်:")
-            confirm_label.setText("အတည်ပြုရန် 'RESET ALL' ရိုက်ထည့်ပါ:")
+            delete_group = self.findChild(QGroupBox, "delete_group")
+            if delete_group:
+                delete_group.setTitle("အောက်ပါဒေတာများ အပြီးတိုင်ဖျက်ပစ်မည်:")
+            keep_group = self.findChild(QGroupBox, "keep_group")
+            if keep_group:
+                keep_group.setTitle("အောက်ပါအချက်များ ထိန်းသိမ်းမည်:")
             self.btn_cancel.setText("မလုပ်တော့")
             self.btn_confirm.setText("အတည်ပြုဖျက်မည်")
     

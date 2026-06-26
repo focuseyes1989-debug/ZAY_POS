@@ -1,0 +1,10 @@
+{
+  "version": "1.0.7",
+  "release_date": "2026-06-24",
+  "release_notes": "Version 1.0.7 released",
+  "download_url": "http://localhost:8000/update/ZAY_POS_v1.0.7.zip",
+  "file_hash": "8739c76e681f900923b900c9df0ef75cf421d39cabb54650c4b9ad19b6a76d85",
+  "file_size": 22,
+  "mandatory": false,
+  "min_required_version": "1.0.0"
+}

@@ -5,7 +5,7 @@ from PyQt6.QtGui import QPixmap
 from models.database import connect_db
 from ui.reports.reports_dialog import ReportsDialog
 from ui.profit_report_dialog import ProfitReportDialog
-from ui.outstanding_report_dialog import OutstandingReportDialog
+from ui.customer_page.outstanding_report_dialog import OutstandingReportDialog
 from ui.auto_backup_dialog import AutoBackupDialog
 from ui.role_management_dialog import RoleManagementDialog
 from ui.activity_log_page import ActivityLogPage
@@ -72,7 +72,7 @@ class MainWindowActions:
 
     # ========== CREDIT ACTIONS ==========
     def open_outstanding_report(self):
-        dialog = OutstandingReportDialog(self)
+        dialog = OutstandingReportDialog(self)  # ✅ Now works with updated import
         dialog.exec()
 
     # ========== BACKUP ACTIONS ==========

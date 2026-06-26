@@ -226,7 +226,10 @@ class ProductFormDialog(QDialog):
         return image_dir
 
     def normalize_product_image_path(self, image_path):
-        """Normalize and optimize product image"""
+        """
+        Normalize and optimize product image.
+        Stores relative path for portability.
+        """
         if not image_path:
             return ""
 
@@ -241,7 +244,18 @@ class ProductFormDialog(QDialog):
             quality=80,
             output_format='JPEG'
         )
-        return optimized_path
+        
+        # ✅ Store as relative path for portability
+        if optimized_path:
+            # Get just the filename
+            filename = os.path.basename(optimized_path)
+            
+            # Store as relative path (database/product_images/filename)
+            # This ensures it works on any computer
+            relative_path = os.path.join('database', 'product_images', filename)
+            return relative_path
+        
+        return image_path
 
     def generate_sku(self):
         conn = connect_db()

@@ -84,7 +84,18 @@ class MainWindow(QMainWindow, MainWindowUI, MainWindowMenus, MainWindowActions, 
         self.has_alerts = False
 
     def setFixedWindowTitle(self):
-        self.setWindowTitle("ZAY POS Lite")
+        """Set window title with version number."""
+        from updater.version_manager import VersionManager
+        
+        try:
+            version_manager = VersionManager()
+            version = version_manager.get_current_version()
+            self.setWindowTitle(f"ZAY POS Lite v{version}")
+            logger.info(f"Window title set: ZAY POS Lite v{version}")
+        except Exception as e:
+            logger.warning(f"Could not get version for window title: {e}")
+            self.setWindowTitle("ZAY POS Lite")
+            logger.info("Window title set: ZAY POS Lite (no version)")
 
     def load_follow_system_theme(self):
         from models.database import connect_db

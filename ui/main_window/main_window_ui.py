@@ -1,12 +1,13 @@
-# ui/main_window_ui.py
+# ui/main_window/main_window_ui.py
 from PyQt6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QLabel,
     QStackedWidget, QStatusBar, QFrame, QSizePolicy, QApplication
 )
-from PyQt6.QtCore import Qt, QSize
+from PyQt6.QtCore import Qt, QSize, QTimer
 from utils.translations import tr
 from utils.permissions import PermissionManager, Permission
 from loguru import logger
+from datetime import datetime
 
 
 class MainWindowUI:
@@ -52,6 +53,24 @@ class MainWindowUI:
         top_layout.addWidget(self.title_label)
         top_layout.addStretch()
         
+        # ========== CLOCK WIDGET ==========
+        self.clock_label = QLabel()
+        self.clock_label.setStyleSheet("""
+            font-size: 10pt;
+            font-weight: bold;
+            padding: 4px 10px;
+            border-radius: 4px;
+            background-color: rgba(0, 0, 0, 0.05);
+        """)
+        self.clock_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        top_layout.addWidget(self.clock_label)
+        
+        # Start clock timer
+        self.clock_timer = QTimer()
+        self.clock_timer.timeout.connect(self.update_clock)
+        self.clock_timer.start(1000)  # Update every second
+        self.update_clock()  # Initial update
+        
         # Navigation buttons - responsive
         self._create_nav_buttons()
         
@@ -83,6 +102,13 @@ class MainWindowUI:
 
         self.apply_role_permissions()
         self.switch_to_page(5)
+
+    def update_clock(self):
+        """Update clock label with current date and time"""
+        now = datetime.now()
+        date_str = now.strftime("%d.%m.%Y")
+        time_str = now.strftime("%I:%M %p")
+        self.clock_label.setText(f"📅 {date_str}  🕐 {time_str}")
 
     def _create_nav_buttons(self):
         """Create navigation buttons with dynamic sizing"""
@@ -117,9 +143,9 @@ class MainWindowUI:
         from ui.inventory_page import InventoryPage
         from ui.receipts_page import ReceiptsPage
         from ui.sales_page import SalesPage
-        from ui.customers_page import CustomersPage
+        from ui.customer_page import CustomersPage
         from ui.expense import ExpensePage
-        from ui.settings import SettingsPage  # <-- IMPORTANT: Change this line
+        from ui.settings import SettingsPage
         
         self.pages = QStackedWidget()
         self.dashboard_page = DashboardPage()
@@ -131,12 +157,13 @@ class MainWindowUI:
             user_id=self.current_user["id"]
         )
         
-        # Connect categories changed signal to refresh sales page
+        # Connect categories changed signal to refresh sales page and current stock tab
         self.products_page.categories_changed.connect(self.refresh_sales_categories)
+        self.products_page.categories_changed.connect(self.refresh_current_stock_categories)
         
         self.inventory_page = InventoryPage(self.current_user["role"])
         
-        # Receipts Page - pass user_id for permission checks
+        # Receipts Page - pass user_id for permission checks (index 4)
         self.receipts_page = ReceiptsPage(
             user_id=self.current_user["id"],
             user_role=self.current_user["role"]
@@ -152,11 +179,14 @@ class MainWindowUI:
             user_id=self.current_user["id"]
         )
 
+        # ============================================================
+        # ✅ PAGE INDEX - IMPORTANT!
+        # ============================================================
         self.pages.addWidget(self.dashboard_page)      # index 0
         self.pages.addWidget(self.sales_summary_page)  # index 1
         self.pages.addWidget(self.products_page)       # index 2
         self.pages.addWidget(self.inventory_page)      # index 3
-        self.pages.addWidget(self.receipts_page)       # index 4
+        self.pages.addWidget(self.receipts_page)       # index 4  ✅ Receipts
         self.pages.addWidget(self.sales_page)          # index 5
         self.pages.addWidget(self.customers_page)      # index 6
         self.pages.addWidget(self.expense_page)        # index 7
@@ -164,6 +194,7 @@ class MainWindowUI:
         
         # Debug output
         logger.info(f"Pages created - user_id: {self.current_user['id']}, role: {self.current_user['role']}")
+        logger.info(f"Receipts page at index 4")
         logger.info(f"Settings page created with user_id: {self.current_user['id']}")
 
     def refresh_sales_categories(self):
@@ -171,6 +202,15 @@ class MainWindowUI:
         if hasattr(self, 'sales_page') and hasattr(self.sales_page, 'refresh_categories'):
             self.sales_page.refresh_categories()
             logger.info("Sales page categories refreshed")
+
+    def refresh_current_stock_categories(self):
+        """Refresh categories in current stock tab when products page categories change"""
+        if hasattr(self, 'inventory_page'):
+            inventory = self.inventory_page
+            if hasattr(inventory, 'current_stock_tab'):
+                inventory.current_stock_tab.load_categories()
+                inventory.current_stock_tab.refresh()
+                logger.info("Current stock tab categories refreshed")
 
     def apply_role_permissions(self):
         user_id = self.current_user["id"]
@@ -215,7 +255,15 @@ class MainWindowUI:
                        self.btn_expense, self.btn_settings]
         for btn in all_buttons:
             btn.setChecked(False)
-        button_map = {0: self.btn_dashboard, 1: self.btn_sales_summary,
-                      5: self.btn_sales, 7: self.btn_expense, 8: self.btn_settings}
-        if index in button_map:
+        
+        # ✅ Updated button_map with correct indices
+        button_map = {
+            0: self.btn_dashboard,
+            1: self.btn_sales_summary,
+            4: None,  # Receipts - no nav button (menu only)
+            5: self.btn_sales,
+            7: self.btn_expense,
+            8: self.btn_settings
+        }
+        if index in button_map and button_map[index] is not None:
             button_map[index].setChecked(True)

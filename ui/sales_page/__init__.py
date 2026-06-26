@@ -12,7 +12,7 @@ from ui.sales_page.cart_widget import CartWidget, load_cart_from_file, delete_ca
 from ui.sales_page.totals_widget import TotalsWidget
 from ui.sales_page.payment_widget import PaymentWidget
 from ui.sales_page.checkout_handler import CheckoutHandler
-from ui.customer_display import CustomerDisplayWindow
+from ui import CustomerDisplayWindow
 
 from models.database import connect_db
 from utils.currency import get_currency_symbol, format_money

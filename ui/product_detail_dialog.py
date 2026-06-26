@@ -1,35 +1,136 @@
+# ui/product_detail_dialog.py
 import os
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QFrame
+    QTableWidget, QTableWidgetItem, QHeaderView, QFrame,
+    QTextEdit, QScrollArea, QWidget, QSizePolicy
 )
-from PyQt6.QtCore import Qt, QDate
-from PyQt6.QtGui import QPixmap, QColor, QIcon
+from PyQt6.QtCore import Qt, QDate, QSize
+from PyQt6.QtGui import QPixmap, QColor, QIcon, QFontMetrics
 from models.database import connect_db
 from utils.paths import app_path
+import functools
 
 
+# ========== IMAGE PATH RESOLVER ==========
+def _find_image_file(search_dir, filename):
+    """Recursively search for an image file in a directory."""
+    if not os.path.isdir(search_dir):
+        return None
+    
+    for root, _, files in os.walk(search_dir):
+        if filename in files:
+            return os.path.join(root, filename)
+    
+    return None
+
+
+def resolve_image_path(image_path: str):
+    """Resolve image path with fallback for portable paths."""
+    if not image_path:
+        return ""
+    
+    # If path is already absolute, use it
+    if os.path.isabs(image_path):
+        if os.path.exists(image_path):
+            return image_path
+        # If absolute path doesn't exist, try to find by filename
+        return _find_relative_image(image_path)
+    
+    # Try relative paths
+    possible_paths = [
+        image_path,
+        os.path.join('database', 'product_images', os.path.basename(image_path)),
+        app_path(image_path),
+        app_path('database', 'product_images', os.path.basename(image_path)),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # Last resort: search in product_images directory
+    product_images_dir = app_path('database', 'product_images')
+    if os.path.isdir(product_images_dir):
+        filename = os.path.basename(image_path)
+        found = _find_image_file(product_images_dir, filename)
+        if found:
+            return found
+    
+    return image_path
+
+
+def _find_relative_image(image_path):
+    """Try to find an image by its filename in common locations."""
+    if not image_path:
+        return None
+    
+    filename = os.path.basename(image_path)
+    
+    # Search in common locations
+    search_dirs = [
+        'database/product_images',
+        'database/product_images/thumbnails',
+        'assets/images/products',
+        '.',
+        app_path('database', 'product_images'),
+    ]
+    
+    for search_dir in search_dirs:
+        full_path = os.path.join(search_dir, filename)
+        if os.path.exists(full_path):
+            return full_path
+    
+    return None
+
+
+@functools.lru_cache(maxsize=200)
+def load_product_image(image_path: str, width: int = 400, height: int = 400):
+    """Load and scale product image with caching."""
+    if not image_path:
+        return None
+    
+    resolved_path = resolve_image_path(image_path)
+    if not resolved_path or not os.path.exists(resolved_path):
+        return None
+    
+    pixmap = QPixmap(resolved_path)
+    if pixmap.isNull():
+        return None
+    
+    # Scale image maintaining aspect ratio
+    return pixmap.scaled(
+        width, height,
+        Qt.AspectRatioMode.KeepAspectRatio,
+        Qt.TransformationMode.SmoothTransformation
+    )
+
+
+# ========== PRODUCT DETAIL DIALOG ==========
 class ProductDetailDialog(QDialog):
     def __init__(self, product_id):
         super().__init__()
         self.product_id = product_id
         self.setWindowTitle("Product Details")
-        self.setMinimumSize(550, 750)
+        self.setMinimumSize(600, 800)
         self.setModal(True)
-        self.setWindowIcon(QIcon("assets/icons/zaypos.png"))   # added icon
+        self.setWindowIcon(QIcon("assets/icons/zaypos.png"))
 
         # Store product data for later status update
         self.product_data = None
+        self.image_label_width = 0
+        self.image_label_height = 0
 
         # Property keys (English)
         self.property_keys = [
             "SKU", "Name", "Category", "Barcode",
-            "Price", "Stock", "Low Stock Alert", "Expire Date", "Status"
+            "Price", "Stock", "Low Stock Alert", "Expire Date", "Status", "Description"
         ]
         # Myanmar translations
         self.property_my = [
             "SKU", "ပစ္စည်းအမည်", "အမျိုးအစား", "ဘားကုဒ်",
-            "စျေးနှုန်း", "ကျန်ရှိသိုလှောင်မှု", "သတိပေးသိုလှောင်မှု", "သက်တမ်းကုန်ရက်", "အခြေအနေ"
+            "စျေးနှုန်း", "ကျန်ရှိသိုလှောင်မှု", "သတိပေးသိုလှောင်မှု", 
+            "သက်တမ်းကုန်ရက်", "အခြေအနေ", "ဖော်ပြချက်"
         ]
 
         # Main layout
@@ -40,7 +141,12 @@ class ProductDetailDialog(QDialog):
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.image_label.setFixedHeight(250)
-        self.image_label.setStyleSheet("border: 1px solid #ccc; background-color: #fafafa;")
+        self.image_label.setMinimumHeight(200)
+        self.image_label.setStyleSheet("""
+            border: 1px solid #ccc; 
+            background-color: #fafafa;
+            border-radius: 8px;
+        """)
         self.image_label.setText("Loading image...")
         main_layout.addWidget(self.image_label)
 
@@ -71,6 +177,11 @@ class ProductDetailDialog(QDialog):
 
         self.table.setRowCount(len(self.property_keys))
         self.table_items = []  # store references to left column items for later translation
+        
+        # Set default row heights
+        default_row_height = 35
+        description_row_height = 120  # ✅ Description row ကို ပိုမြင့်အောင်
+        
         for row, prop in enumerate(self.property_keys):
             item_prop = QTableWidgetItem(prop)
             font = item_prop.font()
@@ -78,13 +189,52 @@ class ProductDetailDialog(QDialog):
             item_prop.setFont(font)
             self.table.setItem(row, 0, item_prop)
             self.table_items.append(item_prop)
-            self.table.setItem(row, 1, QTableWidgetItem("-"))
+            
+            # Set row height
+            if prop == "Description":
+                # ✅ Description row ကို ပိုမြင့်အောင်သတ်မှတ်
+                self.table.setRowHeight(row, description_row_height)
+            else:
+                self.table.setRowHeight(row, default_row_height)
+            
+            # Description row အတွက် QTextEdit widget ထည့်
+            if prop == "Description":
+                # Create a container widget for description
+                desc_container = QWidget()
+                desc_layout = QVBoxLayout(desc_container)
+                desc_layout.setContentsMargins(4, 4, 4, 4)
+                desc_layout.setSpacing(0)
+                
+                self.description_text = QTextEdit()
+                self.description_text.setReadOnly(True)
+                self.description_text.setStyleSheet("""
+                    QTextEdit {
+                        border: none;
+                        background-color: transparent;
+                        font-size: 13px;
+                        padding: 4px;
+                    }
+                """)
+                # ✅ Description text ရဲ့ အမြင့်ကို row height နဲ့လိုက်အောင်
+                self.description_text.setMaximumHeight(description_row_height - 10)
+                self.description_text.setMinimumHeight(40)
+                self.description_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+                
+                desc_layout.addWidget(self.description_text)
+                self.table.setCellWidget(row, 1, desc_container)
+            else:
+                self.table.setItem(row, 1, QTableWidgetItem("-"))
+
+        # ✅ Table row height ကို resize လုပ်နိုင်အောင်
+        self.table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.verticalHeader().setDefaultSectionSize(default_row_height)
 
         main_layout.addWidget(self.table)
 
         # ----- Close Button -----
         self.btn_close = QPushButton("Close")
         self.btn_close.clicked.connect(self.accept)
+        self.btn_close.setFixedWidth(120)
         main_layout.addWidget(self.btn_close, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.setLayout(main_layout)
@@ -123,6 +273,8 @@ class ProductDetailDialog(QDialog):
                 self.image_label.setText("ပုံဖိုင်မမှန်ပါ")
             elif current_img_text == "No image available":
                 self.image_label.setText("ပုံမရှိပါ")
+            elif current_img_text == "Image not found":
+                self.image_label.setText("ပုံမတွေ့ပါ")
         else:
             # English
             self.setWindowTitle("Product Details")
@@ -138,15 +290,17 @@ class ProductDetailDialog(QDialog):
                 self.image_label.setText("Invalid image file")
             elif current_img_text == "ပုံမရှိပါ":
                 self.image_label.setText("No image available")
+            elif current_img_text == "ပုံမတွေ့ပါ":
+                self.image_label.setText("Image not found")
 
         # Refresh the status value (because it contains translated text)
         self.update_status_value()
 
     def update_status_value(self):
-        """Re‑compute and update the status row using current language."""
+        """Re-compute and update the status row using current language."""
         if not self.product_data:
             return
-        sku, name, category, barcode, price, stock, low_stock, expire_date, image_path = self.product_data
+        sku, name, category, barcode, price, stock, low_stock, expire_date, image_path, description = self.product_data
         stock_val = int(stock) if stock is not None else 0
         low_val = int(low_stock) if low_stock is not None else 0
         today = QDate.currentDate()
@@ -194,7 +348,12 @@ class ProductDetailDialog(QDialog):
             status_item.setForeground(QColor(46, 204, 113))
             status_item.setBackground(QColor(240, 255, 240))
         status_item.setFont(self.table.font())
-        self.table.setItem(self.property_keys.index("Status"), 1, status_item)
+        
+        try:
+            status_row = self.property_keys.index("Status")
+            self.table.setItem(status_row, 1, status_item)
+        except ValueError:
+            pass
 
     def load_product_data(self):
         try:
@@ -202,7 +361,7 @@ class ProductDetailDialog(QDialog):
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT sku, name, category, barcode, price, stock, low_stock,
-                       expire_date, image
+                       expire_date, image, description
                 FROM products WHERE id=?
             """, (self.product_id,))
             product = cursor.fetchone()
@@ -213,7 +372,7 @@ class ProductDetailDialog(QDialog):
                 return
 
             self.product_data = product
-            sku, name, category, barcode, price, stock, low_stock, expire_date, image_path = product
+            sku, name, category, barcode, price, stock, low_stock, expire_date, image_path, description = product
 
             stock_val = int(stock) if stock is not None else 0
             low_val = int(low_stock) if low_stock is not None else 0
@@ -228,36 +387,153 @@ class ProductDetailDialog(QDialog):
             self.set_table_value("Low Stock Alert", str(low_val))
             self.set_table_value("Expire Date", expire_date or "None")
 
-            # Load image
+            # ✅ Set Description with auto-height adjustment
+            if description:
+                self.description_text.setPlainText(description)
+                # ✅ Description length ပေါ်မူတည်ပြီး row height ကို auto adjust လုပ်
+                self.adjust_description_height(description)
+            else:
+                no_desc = "No description" if self.get_lang() != "my" else "ဖော်ပြချက်မရှိပါ"
+                self.description_text.setPlainText(no_desc)
+                self.adjust_description_height(no_desc)
+
+            # Load image using the improved resolver
             self.load_image(image_path)
+            
             # Status will be set in retranslateUi() -> update_status_value()
         except Exception as e:
             self.set_table_value("SKU", f"Error: {str(e)}")
 
+    def adjust_description_height(self, text):
+        """
+        ✅ Description text ရဲ့ အရှည်ပေါ်မူတည်ပြီး row height ကို auto adjust လုပ်ပေး
+        """
+        try:
+            # Get description row index
+            desc_row = self.property_keys.index("Description")
+            
+            # Calculate needed height based on text length
+            # Base height: 40px, each ~100 characters add 20px
+            text_length = len(text)
+            
+            # Count newlines for better estimation
+            newline_count = text.count('\n')
+            
+            # Estimate height: base + (lines * line_height)
+            # Line height ~ 20px, base padding ~ 20px
+            estimated_lines = max(1, (text_length // 50) + 1 + newline_count)
+            estimated_height = max(40, min(200, estimated_lines * 22 + 20))
+            
+            # Set row height
+            self.table.setRowHeight(desc_row, estimated_height)
+            
+            # Update QTextEdit height
+            self.description_text.setMaximumHeight(estimated_height - 10)
+            self.description_text.setMinimumHeight(40)
+            
+        except Exception as e:
+            # Fallback: use default height
+            try:
+                desc_row = self.property_keys.index("Description")
+                self.table.setRowHeight(desc_row, 80)
+            except:
+                pass
+
     def set_table_value(self, property_name, value):
+        """Set value for a table row (non-description rows)."""
         try:
             row = self.property_keys.index(property_name)
+            # Skip description row (handled separately)
+            if property_name == "Description":
+                return
             self.table.setItem(row, 1, QTableWidgetItem(value))
         except ValueError:
             pass
 
     def load_image(self, image_path):
+        """Load product image with improved path resolution."""
         lang = self.get_lang()
-        resolved_path = image_path
-        if image_path and not os.path.isabs(image_path):
-            resolved_path = app_path(image_path)
-
-        if resolved_path and os.path.exists(resolved_path):
-            pixmap = QPixmap(resolved_path)
-            if not pixmap.isNull():
-                scaled = pixmap.scaled(
-                    self.image_label.width() - 20,
-                    self.image_label.height() - 20,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
-                self.image_label.setPixmap(scaled)
-            else:
-                self.image_label.setText("Invalid image file" if lang != "my" else "ပုံဖိုင်မမှန်ပါ")
-        else:
+        
+        if not image_path:
             self.image_label.setText("No image available" if lang != "my" else "ပုံမရှိပါ")
+            return
+        
+        # Use the improved resolve_image_path function
+        resolved_path = resolve_image_path(image_path)
+        
+        if not resolved_path:
+            self.image_label.setText("Image not found" if lang != "my" else "ပုံမတွေ့ပါ")
+            return
+        
+        if os.path.exists(resolved_path):
+            try:
+                # Load and scale image
+                pixmap = QPixmap(resolved_path)
+                if not pixmap.isNull():
+                    # Get label size
+                    label_width = self.image_label.width() - 20
+                    label_height = self.image_label.height() - 20
+                    
+                    # If label size is 0 (not visible yet), use default
+                    if label_width <= 0:
+                        label_width = 400
+                    if label_height <= 0:
+                        label_height = 230
+                    
+                    # Scale image maintaining aspect ratio
+                    scaled = pixmap.scaled(
+                        label_width,
+                        label_height,
+                        Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
+                    self.image_label.setPixmap(scaled)
+                    self.image_label.setText("")
+                    return
+                else:
+                    self.image_label.setText("Invalid image file" if lang != "my" else "ပုံဖိုင်မမှန်ပါ")
+                    return
+            except Exception as e:
+                print(f"Error loading image: {e}")
+                self.image_label.setText("Invalid image file" if lang != "my" else "ပုံဖိုင်မမှန်ပါ")
+                return
+        else:
+            # Try one more time with just the filename
+            filename = os.path.basename(image_path)
+            product_images_dir = app_path('database', 'product_images')
+            found_path = _find_image_file(product_images_dir, filename)
+            
+            if found_path and os.path.exists(found_path):
+                try:
+                    pixmap = QPixmap(found_path)
+                    if not pixmap.isNull():
+                        label_width = self.image_label.width() - 20
+                        label_height = self.image_label.height() - 20
+                        if label_width <= 0:
+                            label_width = 400
+                        if label_height <= 0:
+                            label_height = 230
+                        
+                        scaled = pixmap.scaled(
+                            label_width,
+                            label_height,
+                            Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation
+                        )
+                        self.image_label.setPixmap(scaled)
+                        self.image_label.setText("")
+                        return
+                except:
+                    pass
+            
+            self.image_label.setText("Image not found" if lang != "my" else "ပုံမတွေ့ပါ")
+
+    def resizeEvent(self, event):
+        """Handle resize event to update image scaling."""
+        super().resizeEvent(event)
+        # If there's an image loaded, reload it with new size
+        if self.product_data and len(self.product_data) >= 10:
+            image_path = self.product_data[8]
+            if image_path:
+                # Reload image with current size
+                self.load_image(image_path)

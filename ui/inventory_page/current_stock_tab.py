@@ -94,6 +94,7 @@ class CurrentStockTab(QWidget):
         self.retranslateUi()
 
     def load_categories(self):
+        """Load categories from database into filter combo box"""
         conn = connect_db()
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM categories ORDER BY name")
@@ -157,6 +158,7 @@ class CurrentStockTab(QWidget):
         self.load_data()
 
     def refresh(self):
+        """Refresh the current tab data"""
         self.load_data()
         self.retranslateUi()
 
@@ -239,7 +241,7 @@ class CurrentStockTab(QWidget):
 
         offset = (page - 1) * page_size
         
-        # Query with filters - FIXED: Remove DISTINCT from GROUP_CONCAT
+        # Query with filters
         cursor.execute(f"""
             SELECT 
                 p.id, 
@@ -284,7 +286,7 @@ class CurrentStockTab(QWidget):
             sold_by = row[10]
             status = row[11]
             last_upd = row[12]
-            locations = row[13]  # This is GROUP_CONCAT result
+            locations = row[13]
             
             r = self.stock_table.rowCount()
             self.stock_table.insertRow(r)
@@ -317,11 +319,9 @@ class CurrentStockTab(QWidget):
             
             self.stock_table.setItem(r, 10, QTableWidgetItem(str(last_upd) if last_upd else ""))
             
-            # Clean up locations string - remove any trailing commas
+            # Clean up locations string
             locations_str = str(locations) if locations else ""
-            # Remove duplicates and clean up
             if locations_str:
-                # Split, remove duplicates, and join
                 loc_list = [loc.strip() for loc in locations_str.split(',') if loc.strip()]
                 seen = set()
                 unique_locs = []

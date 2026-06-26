@@ -15,6 +15,7 @@ from ui.widgets.pagination_widget import PaginationWidget
 
 
 def resolve_image_path(image_path: str):
+    """Resolve image path to absolute path using app_path for relative paths."""
     if not image_path:
         return ""
     if os.path.isabs(image_path):
@@ -24,9 +25,43 @@ def resolve_image_path(image_path: str):
 
 @functools.lru_cache(maxsize=100)
 def load_thumbnail(image_path: str, size: int = 50):
+    """
+    Load and cache product image thumbnail.
+    Supports both relative and absolute paths.
+    Will try multiple path resolutions if the image is not found.
+    """
+    if not image_path:
+        return None
+    
+    # First attempt: resolve using app_path
     resolved_path = resolve_image_path(image_path)
+    
+    # If not found, try alternative resolutions
+    if not resolved_path or not os.path.exists(resolved_path):
+        # Try relative to current working directory
+        if not os.path.isabs(image_path):
+            alt_path = os.path.join(os.getcwd(), image_path)
+            if os.path.exists(alt_path):
+                resolved_path = alt_path
+            else:
+                # Try just the filename in product_images directory
+                filename = os.path.basename(image_path)
+                # Get the database directory
+                db_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                alt_path2 = os.path.join(db_dir, 'database', 'product_images', filename)
+                if os.path.exists(alt_path2):
+                    resolved_path = alt_path2
+                else:
+                    # Try app_path again with just the filename
+                    alt_path3 = app_path(os.path.join('database', 'product_images', filename))
+                    if os.path.exists(alt_path3):
+                        resolved_path = alt_path3
+    
+    # If still not found, return None
     if not resolved_path or not os.path.exists(resolved_path):
         return None
+    
+    # Load and scale the image
     reader = QImageReader(resolved_path)
     reader.setScaledSize(QSize(size, size))
     image = reader.read()

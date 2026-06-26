@@ -1,0 +1,548 @@
+# updater/update_manager.py
+"""
+Main update manager with GitHub support only.
+"""
+
+import os
+import sys
+import json
+import requests
+import subprocess
+import time
+import socket
+import threading
+import urllib3
+import urllib.request
+import ssl
+from urllib.error import URLError
+from typing import Optional, Dict
+from datetime import datetime
+from loguru import logger
+from PyQt6.QtWidgets import QMessageBox, QApplication
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal
+
+from updater.version_manager import VersionManager
+from updater.update_worker import UpdateWorker
+from updater.update_dialog import UpdateDialog
+
+# Disable SSL warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+class UpdateCheckerThread(QThread):
+    """Background thread for checking updates."""
+    
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+    
+    def __init__(self, update_manager):
+        super().__init__()
+        self.update_manager = update_manager
+        
+    def run(self):
+        try:
+            result = self.update_manager._fetch_version_info_safe()
+            self.finished.emit(result)
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class UpdateManager:
+    """Main update manager with GitHub support only."""
+    
+    GITHUB_REPO = "focuseyes1989-debug/ZAY_POS"
+    UPDATE_SERVER = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+    RAW_VERSION_URL = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/update_build/version.json"
+    
+    def __init__(self, parent=None):
+        self.parent = parent
+        self.version_manager = VersionManager()
+        self.worker = None
+        self.update_dialog = None
+        self.update_info = None
+        self.use_github = True
+        self.update_url = self.UPDATE_SERVER
+        self.checker_thread = None
+        self._last_check_time = 0
+        self._check_in_progress = False
+        self._cache = {}
+        self._cache_time = 0
+        self._cache_duration = 3600  # 1 hour cache
+        
+    def check_for_updates(self, show_no_update_msg: bool = True, async_check: bool = True) -> bool:
+        """Check for updates."""
+        if self._check_in_progress:
+            logger.warning("Update check already in progress")
+            return False
+            
+        current_time = time.time()
+        if current_time - self._last_check_time < 30:
+            logger.info("Skipping update check (rate limited)")
+            return False
+            
+        self._last_check_time = current_time
+        
+        if async_check:
+            return self._check_for_updates_async(show_no_update_msg)
+        else:
+            return self._check_for_updates_sync(show_no_update_msg)
+    
+    def _check_for_updates_async(self, show_no_update_msg: bool = True) -> bool:
+        """Check for updates asynchronously."""
+        self._check_in_progress = True
+        
+        self.checker_thread = UpdateCheckerThread(self)
+        self.checker_thread.finished.connect(
+            lambda result: self._on_async_check_finished(result, show_no_update_msg)
+        )
+        self.checker_thread.error.connect(
+            lambda error: self._on_async_check_error(error, show_no_update_msg)
+        )
+        self.checker_thread.start()
+        
+        return False
+    
+    def _on_async_check_finished(self, version_info: Dict, show_no_update_msg: bool):
+        """Handle async check completion."""
+        self._check_in_progress = False
+        
+        if not version_info:
+            logger.warning("No version info received")
+            if show_no_update_msg:
+                self._show_error_message(
+                    "Check Update",
+                    "Could not check for updates. Please check your internet connection."
+                )
+            return
+        
+        self._process_version_info(version_info, show_no_update_msg)
+    
+    def _on_async_check_error(self, error: str, show_no_update_msg: bool):
+        """Handle async check error."""
+        self._check_in_progress = False
+        logger.error(f"Async update check error: {error}")
+        
+        if show_no_update_msg:
+            self._show_error_message(
+                "Check Update",
+                f"Failed to check for updates: {error}\n\nPlease try again later."
+            )
+    
+    def _check_for_updates_sync(self, show_no_update_msg: bool = True) -> bool:
+        """Check for updates synchronously."""
+        try:
+            logger.info("Checking for updates...")
+            
+            version_info = self._fetch_version_info_safe()
+            
+            if not version_info:
+                logger.warning("Could not fetch version info")
+                if show_no_update_msg:
+                    self._show_error_message(
+                        "Check Update",
+                        "Could not check for updates. Please check your internet connection."
+                    )
+                return False
+            
+            return self._process_version_info(version_info, show_no_update_msg)
+                
+        except Exception as e:
+            logger.error(f"Failed to check for updates: {e}")
+            if show_no_update_msg:
+                self._show_error_message(
+                    "Check Update",
+                    f"Failed to check for updates: {str(e)}\n\nPlease try again later."
+                )
+            return False
+    
+    def _process_version_info(self, version_info: Dict, show_no_update_msg: bool) -> bool:
+        """Process version information."""
+        current_version = self.version_manager.get_current_version()
+        latest_version = version_info.get('version', '')
+        
+        is_available = self.version_manager.is_update_available(latest_version)
+        
+        if is_available:
+            logger.info(f"Update available: {current_version} -> {latest_version}")
+            
+            self.update_info = {
+                'version': latest_version,
+                'download_url': version_info.get('download_url', ''),
+                'file_hash': version_info.get('file_hash', ''),
+                'file_size': version_info.get('file_size', 0),
+                'release_notes': version_info.get('release_notes', ''),
+                'release_date': version_info.get('release_date', ''),
+                'mandatory': version_info.get('mandatory', False),
+                'release_url': version_info.get('release_url', '')
+            }
+            
+            if not self.update_info['download_url']:
+                logger.error("No download URL found")
+                self._show_error_message(
+                    "Update Error",
+                    "No download URL found.\nPlease download manually from:\n"
+                    f"https://github.com/{self.GITHUB_REPO}/releases"
+                )
+                return False
+            
+            self._show_update_dialog(self.update_info)
+            return True
+            
+        else:
+            logger.info(f"No update available. Current: {current_version}")
+            if show_no_update_msg:
+                QMessageBox.information(
+                    self.parent,
+                    "Check Update",
+                    f"You are using the latest version ({current_version})."
+                )
+            return False
+    
+    def _fetch_version_info_safe(self) -> Optional[Dict]:
+        """Fetch version from GitHub only."""
+        current_time = time.time()
+        
+        # Check cache
+        if self._cache and (current_time - self._cache_time) < self._cache_duration:
+            logger.info("Using cached version info")
+            return self._cache
+        
+        # GitHub methods only
+        fetch_methods = [
+            self._fetch_from_raw_github,
+            self._fetch_from_github_urllib,
+            self._fetch_from_github_with_retry,
+            self._fetch_from_github_alternative,
+        ]
+        
+        for method in fetch_methods:
+            try:
+                logger.info(f"Trying {method.__name__}...")
+                result = method()
+                if result:
+                    self._cache = result
+                    self._cache_time = current_time
+                    logger.info(f"✅ Success using {method.__name__}")
+                    return result
+            except Exception as e:
+                logger.warning(f"{method.__name__} failed: {e}")
+                continue
+        
+        if self._cache:
+            logger.info("Using cached data (all fetch methods failed)")
+            return self._cache
+        
+        return None
+    
+    def _fetch_from_raw_github(self) -> Optional[Dict]:
+        """Fetch from GitHub raw content."""
+        logger.info(f"Fetching from GitHub raw: {self.RAW_VERSION_URL}")
+        
+        try:
+            response = requests.get(
+                self.RAW_VERSION_URL,
+                timeout=15,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Cache-Control': 'no-cache'
+                }
+            )
+            
+            if response.status_code == 200:
+                data = response.json()
+                return {
+                    'version': data.get('version', ''),
+                    'download_url': data.get('download_url', ''),
+                    'file_hash': data.get('file_hash', ''),
+                    'file_size': data.get('file_size', 0),
+                    'release_notes': data.get('release_notes', ''),
+                    'release_date': data.get('release_date', ''),
+                    'mandatory': data.get('mandatory', False)
+                }
+            return None
+        except Exception as e:
+            logger.warning(f"Raw GitHub request failed: {e}")
+            return None
+    
+    def _fetch_from_github_urllib(self) -> Optional[Dict]:
+        """Fetch using urllib."""
+        try:
+            ssl_context = ssl.create_default_context()
+            ssl_context.check_hostname = False
+            ssl_context.verify_mode = ssl.CERT_NONE
+            
+            req = urllib.request.Request(
+                self.UPDATE_SERVER,
+                headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json'
+                }
+            )
+            
+            with urllib.request.urlopen(req, timeout=20, context=ssl_context) as response:
+                data = json.loads(response.read().decode('utf-8'))
+                return self._parse_github_response(data)
+        except Exception as e:
+            logger.warning(f"urllib request failed: {e}")
+            return None
+    
+    def _fetch_from_github_with_retry(self) -> Optional[Dict]:
+        """Fetch with retry logic."""
+        for attempt in range(3):
+            try:
+                timeouts = [15, 25, 35]
+                timeout = timeouts[attempt]
+                
+                session = requests.Session()
+                session.verify = False
+                
+                headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json',
+                    'Cache-Control': 'no-cache',
+                    'Connection': 'close'
+                }
+                
+                response = session.get(
+                    self.UPDATE_SERVER,
+                    timeout=timeout,
+                    headers=headers
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    return self._parse_github_response(data)
+                elif response.status_code == 403:
+                    logger.warning("Rate limited, waiting...")
+                    time.sleep(5)
+                    continue
+                    
+            except Exception as e:
+                logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                if attempt < 2:
+                    time.sleep(2)
+        
+        return None
+    
+    def _fetch_from_github_alternative(self) -> Optional[Dict]:
+        """Fetch from alternative endpoint."""
+        alt_url = f"https://api.github.com/repos/{self.GITHUB_REPO}/releases"
+        
+        try:
+            response = requests.get(
+                alt_url,
+                timeout=10,
+                headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            )
+            
+            if response.status_code == 200:
+                releases = response.json()
+                if releases:
+                    return self._parse_github_response(releases[0])
+            return None
+        except Exception as e:
+            logger.warning(f"Alternative GitHub fetch failed: {e}")
+            return None
+    
+    def _parse_github_response(self, data: Dict) -> Dict:
+        """Parse GitHub API response."""
+        tag_name = data.get('tag_name', '').replace('v', '')
+        assets = data.get('assets', [])
+        
+        download_url = ''
+        file_size = 0
+        
+        for asset in assets:
+            name = asset.get('name', '')
+            if name.endswith('.zip') and 'ZAY_POS' in name:
+                download_url = asset.get('browser_download_url', '')
+                file_size = asset.get('size', 0)
+                break
+        
+        if not download_url and assets:
+            download_url = assets[0].get('browser_download_url', '')
+            file_size = assets[0].get('size', 0)
+        
+        if not download_url:
+            download_url = f"https://github.com/{self.GITHUB_REPO}/releases/download/v{tag_name}/ZAY_POS_v{tag_name}.zip"
+        
+        return {
+            'version': tag_name,
+            'download_url': download_url,
+            'file_hash': '',
+            'file_size': file_size,
+            'release_notes': data.get('body', 'No release notes'),
+            'release_date': data.get('published_at', ''),
+            'mandatory': False,
+            'release_url': data.get('html_url', '')
+        }
+    
+    def _show_error_message(self, title: str, message: str):
+        """Show error message."""
+        try:
+            QMessageBox.warning(self.parent, title, message)
+        except Exception as e:
+            logger.error(f"Failed to show error: {e}")
+    
+    def _show_update_dialog(self, update_info: Dict):
+        """Show update dialog."""
+        try:
+            dialog = UpdateDialog(update_info, self.parent)
+            if dialog.exec() == UpdateDialog.DialogCode.Accepted:
+                self._start_update(update_info)
+        except Exception as e:
+            logger.error(f"Failed to show dialog: {e}")
+    
+    def _start_update(self, update_info: Dict):
+        """Start update."""
+        if not update_info.get('download_url'):
+            self._show_error_message(
+                "Update Error",
+                "No download URL available.\nPlease download manually."
+            )
+            return
+        
+        try:
+            from updater.update_dialog import UpdateProgressDialog
+            progress_dialog = UpdateProgressDialog(self.parent)
+            
+            self.worker = UpdateWorker(update_info)
+            self.worker.progress.connect(progress_dialog.update_progress)
+            self.worker.log_message.connect(progress_dialog.add_log)
+            self.worker.finished.connect(
+                lambda success, msg: self._on_update_finished(success, msg, progress_dialog)
+            )
+            
+            progress_dialog.show()
+            self.worker.start()
+        except Exception as e:
+            logger.error(f"Failed to start update: {e}")
+    
+    def _on_update_finished(self, success: bool, message: str, progress_dialog):
+        """Handle update completion."""
+        if success:
+            progress_dialog.show_complete(message)
+            
+            try:
+                new_version = self.update_info.get('version', '')
+                if new_version:
+                    self.version_manager.update_version(new_version)
+                    logger.info(f"Version updated to: {new_version}")
+                
+                version_info = self.version_manager.load_update_metadata()
+                version_info['last_update'] = datetime.now().isoformat()
+                version_info['last_version'] = new_version
+                self.version_manager.save_update_metadata(version_info)
+                
+            except Exception as e:
+                logger.error(f"Failed to update version: {e}")
+            
+            msg_box = QMessageBox()
+            msg_box.setIcon(QMessageBox.Icon.Information)
+            msg_box.setWindowTitle("Update Complete")
+            msg_box.setText("Update installed successfully!\n\nThe application will restart.")
+            msg_box.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg_box.exec()
+            
+            # Restart with proper environment
+            self._restart_application_proper()
+        else:
+            progress_dialog.show_error(message)
+    
+    def _restart_application_proper(self):
+        """Restart the application with proper environment."""
+        try:
+            logger.info("Restarting application...")
+            
+            # Get the correct executable path
+            if getattr(sys, 'frozen', False):
+                # Running as compiled EXE
+                exe_path = sys.executable
+                args = [exe_path]
+            else:
+                # Running as Python script
+                exe_path = sys.executable
+                args = [exe_path, 'main.py']
+            
+            # Get the current working directory
+            working_dir = os.path.dirname(exe_path) if getattr(sys, 'frozen', False) else os.getcwd()
+            
+            # Use the same environment with proper PATH
+            env = os.environ.copy()
+            
+            # Ensure Python path is correct
+            python_path = env.get('PYTHONPATH', '')
+            if python_path:
+                env['PYTHONPATH'] = f"{working_dir};{python_path}"
+            else:
+                env['PYTHONPATH'] = working_dir
+            
+            # Set matplotlib cache directory
+            cache_dir = os.path.join(os.path.expanduser('~'), 'AppData', 'Local', 'Temp', 'matplotlib_cache')
+            env['MPLCONFIGDIR'] = cache_dir
+            env['PYTHONWARNINGS'] = 'ignore'
+            
+            # Create cache directory
+            os.makedirs(cache_dir, exist_ok=True)
+            
+            # Log the restart command
+            logger.info(f"Restarting: {args}")
+            logger.info(f"Working directory: {working_dir}")
+            
+            # Start new process with CREATE_NEW_PROCESS_GROUP flag on Windows
+            if sys.platform == 'win32':
+                # Use CREATE_NEW_PROCESS_GROUP to avoid console window
+                creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+                startupinfo = subprocess.STARTUPINFO()
+                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+                
+                subprocess.Popen(
+                    args,
+                    env=env,
+                    cwd=working_dir,
+                    creationflags=creationflags,
+                    startupinfo=startupinfo
+                )
+            else:
+                subprocess.Popen(args, env=env, cwd=working_dir)
+            
+            logger.info("✅ Restart command executed successfully")
+            
+            # Exit current process
+            QTimer.singleShot(1000, lambda: sys.exit(0))
+            
+        except Exception as e:
+            logger.error(f"Failed to restart: {e}")
+            # Fallback restart method
+            try:
+                self._restart_application_fallback()
+            except Exception as e2:
+                logger.error(f"Fallback restart also failed: {e2}")
+    
+    def _restart_application_fallback(self):
+        """Fallback restart method."""
+        try:
+            # Simple restart
+            if getattr(sys, 'frozen', False):
+                subprocess.Popen([sys.executable])
+            else:
+                subprocess.Popen([sys.executable, 'main.py'])
+            
+            QTimer.singleShot(1000, lambda: sys.exit(0))
+            
+        except Exception as e:
+            logger.error(f"Fallback restart failed: {e}")
+    
+    def test_connection(self) -> bool:
+        """Test connection."""
+        try:
+            socket.gethostbyname('api.github.com')
+            return True
+        except:
+            return False
+    
+    def clear_cache(self):
+        """Clear cache."""
+        self._cache = {}
+        self._cache_time = 0
+        logger.info("Cache cleared")

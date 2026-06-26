@@ -9,7 +9,7 @@ from models.database import connect_db
 
 
 class ManageCategoriesDialog(QDialog):
-    categories_changed = pyqtSignal()  # Add this signal
+    categories_changed = pyqtSignal()  # Signal for category changes
     
     def __init__(self):
         super().__init__()

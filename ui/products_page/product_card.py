@@ -1,3 +1,4 @@
+# ui/products_page/product_card.py
 from PyQt6.QtWidgets import QWidget, QFrame, QVBoxLayout, QHBoxLayout, QLabel
 from PyQt6.QtCore import pyqtSignal, QDate
 from utils.currency import get_currency_symbol, format_money
@@ -56,6 +57,12 @@ class ProductCards(QWidget):
         parent = self.parent()
         if parent and hasattr(parent, 'on_card_filter'):
             parent.on_card_filter(key)
+        
+        # If Total Cost card is clicked, show category cost dialog
+        if key == "total_cost":
+            from ui.products_page.category_cost_dialog import CategoryCostDialog
+            dialog = CategoryCostDialog(parent)
+            dialog.exec()
 
     def update_cards(self):
         symbol = get_currency_symbol()

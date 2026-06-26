@@ -1,6 +1,6 @@
 # ui/dashboard/dashboard_page.py
-from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView, QLabel
-from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QMessageBox
+from PyQt6.QtCore import Qt, QDate, QTimer
 from models.database import connect_db
 from utils.currency import format_money
 from utils.language import lang
@@ -9,6 +9,7 @@ from ui.dashboard.dashboard_filters import DashboardFilters
 from ui.dashboard.dashboard_export import DashboardExport
 from ui.dashboard.dashboard_dialogs import DiscountedSalesDialog, RefundedSalesDialog
 from ui.dashboard.dashboard_backup import DashboardBackupStatus
+from loguru import logger
 
 
 class DashboardPage(QWidget):
@@ -29,56 +30,66 @@ class DashboardPage(QWidget):
         self.filters.filter_changed.connect(self.refresh_dashboard)
         main_layout.addWidget(self.filters)
         
-        # ========== KPI CARDS (5 cards in one row) ==========
-        kpi_layout = QHBoxLayout()
-        kpi_layout.setSpacing(15)
+        # ============================================================
+        # ✅ ROW 1: TODAY CARDS (5 cards in one row)
+        # ============================================================
+        today_layout = QHBoxLayout()
+        today_layout.setSpacing(15)
         
         # 1. Today's Sales Card
         self.today_sales_card = DashboardCards.create_card("Today's Sales", "0")
         self.today_sales_card.clicked = lambda: self.show_today_sales_detail()
-        kpi_layout.addWidget(self.today_sales_card, 1)
+        today_layout.addWidget(self.today_sales_card, 1)
         
         # 2. Today's Expense Card
         self.today_expense_card = DashboardCards.create_card("Today's Expense", "0")
-        kpi_layout.addWidget(self.today_expense_card, 1)
+        today_layout.addWidget(self.today_expense_card, 1)
         
         # 3. Today's Profit Card
         self.today_profit_card = DashboardCards.create_card("Today's Profit", "0")
-        kpi_layout.addWidget(self.today_profit_card, 1)
+        today_layout.addWidget(self.today_profit_card, 1)
         
-        # 4. Outstanding Credit Card
+        # 4. Today Refunds Card (Clickable - goes to Refunded Tab)
+        self.today_refunds_card = DashboardCards.create_clickable_card("Today Refunds", "0")
+        self.today_refunds_card.clicked.connect(self.go_to_refunded_tab)
+        today_layout.addWidget(self.today_refunds_card, 1)
+        
+        # 5. Today Discount Card (Clickable - goes to Discounted Tab)
+        self.today_discount_card = DashboardCards.create_clickable_card("Today Discount", "0")
+        self.today_discount_card.clicked.connect(self.go_to_discounted_tab)
+        today_layout.addWidget(self.today_discount_card, 1)
+        
+        main_layout.addLayout(today_layout)
+        
+        # ============================================================
+        # ✅ ROW 2: OTHER CARDS (Outstanding Credit, Low Stock Count, etc.)
+        # ============================================================
+        other_layout = QHBoxLayout()
+        other_layout.setSpacing(15)
+        
+        # 1. Outstanding Credit Card
         self.outstanding_card = DashboardCards.create_clickable_card("Outstanding Credit", "0")
         self.outstanding_card.clicked.connect(self.go_to_outstanding_report)
-        kpi_layout.addWidget(self.outstanding_card, 1)
+        other_layout.addWidget(self.outstanding_card, 1)
         
-        # 5. Low Stock Count Card
+        # 2. Low Stock Count Card
         self.low_stock_card = DashboardCards.create_clickable_card("Low Stock Count", "0")
         self.low_stock_card.clicked.connect(self.go_to_low_stock_tab)
-        kpi_layout.addWidget(self.low_stock_card, 1)
+        other_layout.addWidget(self.low_stock_card, 1)
         
-        main_layout.addLayout(kpi_layout)
-        
-        # ========== FINANCIAL SUMMARY CARDS (Optional - can be hidden) ==========
-        # These are additional cards for detailed financial info
-        summary_layout = QHBoxLayout()
-        summary_layout.setSpacing(15)
-        
+        # 3. Gross Sales Card
         self.gross_sales_card = DashboardCards.create_card("Gross Sales", "0")
-        summary_layout.addWidget(self.gross_sales_card, 1)
+        other_layout.addWidget(self.gross_sales_card, 1)
         
+        # 4. Net Sales Card
         self.net_sales_card = DashboardCards.create_card("Net Sales", "0")
-        summary_layout.addWidget(self.net_sales_card, 1)
+        other_layout.addWidget(self.net_sales_card, 1)
         
+        # 5. Gross Profit Card
         self.gross_profit_card = DashboardCards.create_card("Gross Profit", "0")
-        summary_layout.addWidget(self.gross_profit_card, 1)
+        other_layout.addWidget(self.gross_profit_card, 1)
         
-        self.refunds_card = DashboardCards.create_card("Refunds", "0")
-        summary_layout.addWidget(self.refunds_card, 1)
-        
-        self.discount_card = DashboardCards.create_card("Discount", "0")
-        summary_layout.addWidget(self.discount_card, 1)
-        
-        main_layout.addLayout(summary_layout)
+        main_layout.addLayout(other_layout)
         
         # Backup status card
         backup_layout = QHBoxLayout()
@@ -97,17 +108,88 @@ class DashboardPage(QWidget):
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(["Date", "Gross Sales", "Net Sales", "Gross Profit", "Refunds", "Discount"])
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.cellDoubleClicked.connect(self.on_table_double_click)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         main_layout.addWidget(self.table)
         
         self.setLayout(main_layout)
     
+    # ============================================================
+    # ✅ HELPER: Update card with consistent styling
+    # ============================================================
+    
+    def _update_card_value(self, card, value, symbol=None, color=None):
+        """Update card value with consistent styling"""
+        if card and hasattr(card, 'value_label'):
+            # Format value
+            if symbol:
+                formatted_value = format_money(value, symbol)
+            elif isinstance(value, int):
+                formatted_value = str(value)
+            else:
+                formatted_value = format_money(value)
+            
+            card.value_label.setText(formatted_value)
+            
+            # Apply color if specified, otherwise use default
+            if color:
+                card.value_label.setStyleSheet(f"font-size: 18pt; font-weight: bold; color: {color};")
+            else:
+                card.value_label.setStyleSheet("font-size: 18pt; font-weight: bold; color: palette(windowText);")
+    
+    # ============================================================
+    # ✅ NAVIGATION METHODS
+    # ============================================================
+    
+    def go_to_refunded_tab(self):
+        """Navigate to Refunded Tab in Receipts Page"""
+        main_window = self.window()
+        
+        if hasattr(main_window, 'switch_to_page'):
+            main_window.switch_to_page(4)  # Receipts page
+        
+        QTimer.singleShot(150, lambda: self._switch_to_refunded_tab(main_window))
+    
+    def _switch_to_refunded_tab(self, main_window):
+        """Switch to refunded tab after receipts page loads"""
+        try:
+            if hasattr(main_window, 'receipts_page'):
+                receipts_page = main_window.receipts_page
+                if hasattr(receipts_page, 'tab_widget'):
+                    receipts_page.tab_widget.setCurrentIndex(1)
+                    if hasattr(receipts_page, 'refund_tab'):
+                        receipts_page.refund_tab.load_refunded_sales()
+                        logger.info("Refunded tab loaded")
+        except Exception as e:
+            logger.error(f"Error switching to refunded tab: {e}")
+
+    def go_to_discounted_tab(self):
+        """Navigate to Discounted Tab in Receipts Page"""
+        main_window = self.window()
+        
+        if hasattr(main_window, 'switch_to_page'):
+            main_window.switch_to_page(4)  # Receipts page
+        
+        QTimer.singleShot(150, lambda: self._switch_to_discounted_tab(main_window))
+    
+    def _switch_to_discounted_tab(self, main_window):
+        """Switch to discounted tab after receipts page loads"""
+        try:
+            if hasattr(main_window, 'receipts_page'):
+                receipts_page = main_window.receipts_page
+                if hasattr(receipts_page, 'tab_widget'):
+                    receipts_page.tab_widget.setCurrentIndex(2)
+                    if hasattr(receipts_page, 'discount_tab'):
+                        receipts_page.discount_tab.load_discounted_receipts()
+                        logger.info("Discounted tab loaded")
+        except Exception as e:
+            logger.error(f"Error switching to discounted tab: {e}")
+    
     def show_today_sales_detail(self):
         """Show today's sales detail dialog"""
         today = QDate.currentDate().toString("yyyy-MM-dd")
-        from ui.receipts_page import ReceiptsPage
-        # Create a simple dialog to show today's sales
         QMessageBox.information(self, "Today's Sales", f"Today's sales details will be shown here")
     
     def go_to_outstanding_report(self):
@@ -121,94 +203,106 @@ class DashboardPage(QWidget):
         main_window = self.window()
         if hasattr(main_window, 'inventory_page') and main_window.inventory_page:
             if hasattr(main_window, 'switch_to_page'):
-                main_window.switch_to_page(3)
+                main_window.switch_to_page(3)  # Inventory page
                 if hasattr(main_window.inventory_page, 'tabs'):
-                    main_window.inventory_page.tabs.setCurrentIndex(1)
+                    main_window.inventory_page.tabs.setCurrentIndex(1)  # Low stock tab
+    
+    def on_table_double_click(self, row, column):
+        """Handle double click on table row - show daily detail"""
+        date_item = self.table.item(row, 0)
+        if date_item:
+            from_date = date_item.text()
+            to_date = from_date
+            QMessageBox.information(self, "Daily Detail", f"Details for {from_date}")
     
     def update_kpi_cards(self):
-        """Update KPI cards with today's data"""
+        """Update KPI cards with today's data - consistent styling"""
         today = QDate.currentDate().toString("yyyy-MM-dd")
         symbol = self.filters.get_currency_symbol()
-        lang_code = self.get_lang()
         
         conn = connect_db()
         cursor = conn.cursor()
         
-        # 1. Today's Sales
+        # 1. Today's Sales - Green
         cursor.execute("""
             SELECT COALESCE(SUM(total), 0) FROM sales 
             WHERE status = 'completed' AND date(created_at) = ?
         """, (today,))
         today_sales = cursor.fetchone()[0]
-        DashboardCards.update_card(self.today_sales_card, today_sales)
+        self._update_card_value(self.today_sales_card, today_sales, symbol, "#2ecc71")
         
-        # 2. Today's Expense
+        # 2. Today's Expense - Red
         cursor.execute("""
             SELECT COALESCE(SUM(amount), 0) FROM expenses 
             WHERE expense_date = ?
         """, (today,))
         today_expense = cursor.fetchone()[0]
-        DashboardCards.update_card(self.today_expense_card, today_expense)
+        self._update_card_value(self.today_expense_card, today_expense, symbol, "#e74c3c")
         
-        # 3. Today's Profit (Sales - Expense)
+        # 3. Today's Profit - Green if positive, Red if negative
         today_profit = today_sales - today_expense
-        profit_card = self.today_profit_card
-        if hasattr(profit_card, 'value_label'):
-            profit_card.value_label.setText(format_money(today_profit, symbol))
-            if today_profit >= 0:
-                profit_card.value_label.setStyleSheet("color: #2ecc71; font-size: 18pt; font-weight: bold;")
-            else:
-                profit_card.value_label.setStyleSheet("color: #e74c3c; font-size: 18pt; font-weight: bold;")
+        profit_color = "#2ecc71" if today_profit >= 0 else "#e74c3c"
+        self._update_card_value(self.today_profit_card, today_profit, symbol, profit_color)
         
-        # 4. Outstanding Credit (Total balance from credit_sales)
+        # 4. Today Refunds - Red if > 0, Green if 0
+        cursor.execute("""
+            SELECT COALESCE(SUM(total), 0) FROM sales 
+            WHERE status = 'refunded' AND date(created_at) = ?
+        """, (today,))
+        today_refunds = cursor.fetchone()[0]
+        refunds_color = "#e74c3c" if today_refunds > 0 else "#2ecc71"
+        self._update_card_value(self.today_refunds_card, today_refunds, symbol, refunds_color)
+        
+        # 5. Today Discount - Orange if > 0, Green if 0
+        cursor.execute("""
+            SELECT COALESCE(SUM(discount_amount), 0) FROM sales 
+            WHERE status = 'completed' AND discount_amount > 0 AND date(created_at) = ?
+        """, (today,))
+        today_discount = cursor.fetchone()[0]
+        discount_color = "#e67e22" if today_discount > 0 else "#2ecc71"
+        self._update_card_value(self.today_discount_card, today_discount, symbol, discount_color)
+        
+        conn.close()
+    
+    def update_financial_cards(self, from_date, to_date):
+        """Update financial summary cards - consistent styling"""
+        symbol = self.filters.get_currency_symbol()
+        
+        conn = connect_db()
+        cursor = conn.cursor()
+        
+        # 1. Outstanding Credit - Red if > 0, Green if 0
         cursor.execute("""
             SELECT COALESCE(SUM(balance_amount), 0) FROM credit_sales 
             WHERE status != 'paid' AND balance_amount > 0
         """)
         outstanding = cursor.fetchone()[0]
-        outstanding_card = self.outstanding_card
-        if hasattr(outstanding_card, 'value_label'):
-            outstanding_card.value_label.setText(format_money(outstanding, symbol))
-            if outstanding > 0:
-                outstanding_card.value_label.setStyleSheet("color: #e74c3c; font-size: 18pt; font-weight: bold;")
+        outstanding_color = "#e74c3c" if outstanding > 0 else "#2ecc71"
+        self._update_card_value(self.outstanding_card, outstanding, symbol, outstanding_color)
         
-        # 5. Low Stock Count
+        # 2. Low Stock Count - Orange if > 0, Green if 0
         cursor.execute("""
             SELECT COUNT(*) FROM products 
             WHERE (sold_by IS NULL OR sold_by != 'Service') 
               AND stock > 0 AND stock <= low_stock
         """)
         low_stock_count = cursor.fetchone()[0]
-        low_stock_card = self.low_stock_card
-        if hasattr(low_stock_card, 'value_label'):
-            low_stock_card.value_label.setText(str(low_stock_count))
-            if low_stock_count > 0:
-                low_stock_card.value_label.setStyleSheet("color: #e67e22; font-size: 18pt; font-weight: bold;")
+        # ✅ Stock count - no currency symbol, just number
+        stock_color = "#e67e22" if low_stock_count > 0 else "#2ecc71"
+        self._update_card_value(self.low_stock_card, low_stock_count, None, stock_color)
         
-        conn.close()
-    
-    def update_financial_cards(self, from_date, to_date):
-        """Update financial summary cards"""
-        symbol = self.filters.get_currency_symbol()
-        
-        conn = connect_db()
-        cursor = conn.cursor()
-        
-        # Gross Sales
+        # 3. Gross Sales - Blue
         cursor.execute("SELECT COALESCE(SUM(total), 0) FROM sales WHERE status='completed' AND date(created_at) BETWEEN ? AND ?", (from_date, to_date))
         gross_sales = cursor.fetchone()[0]
+        self._update_card_value(self.gross_sales_card, gross_sales, symbol, "#3498db")
         
-        # Refunds
+        # 4. Net Sales - Blue
         cursor.execute("SELECT COALESCE(SUM(total), 0) FROM sales WHERE status='refunded' AND date(created_at) BETWEEN ? AND ?", (from_date, to_date))
         refunds = cursor.fetchone()[0]
-        
         net_sales = gross_sales - refunds
+        self._update_card_value(self.net_sales_card, net_sales, symbol, "#3498db")
         
-        # Discount
-        cursor.execute("SELECT COALESCE(SUM(discount_amount), 0) FROM sales WHERE status='completed' AND date(created_at) BETWEEN ? AND ?", (from_date, to_date))
-        discount_total = cursor.fetchone()[0]
-        
-        # COGS
+        # 5. Gross Profit - Green if positive, Red if negative
         cursor.execute("""
             SELECT COALESCE(SUM(products.cost * sale_items.qty), 0)
             FROM sale_items
@@ -217,16 +311,11 @@ class DashboardPage(QWidget):
             WHERE sales.status='completed' AND date(sales.created_at) BETWEEN ? AND ?
         """, (from_date, to_date))
         cogs = cursor.fetchone()[0]
-        
         gross_profit = net_sales - cogs
+        profit_color = "#2ecc71" if gross_profit >= 0 else "#e74c3c"
+        self._update_card_value(self.gross_profit_card, gross_profit, symbol, profit_color)
         
         conn.close()
-        
-        DashboardCards.update_card(self.gross_sales_card, gross_sales)
-        DashboardCards.update_card(self.net_sales_card, net_sales)
-        DashboardCards.update_card(self.gross_profit_card, gross_profit)
-        DashboardCards.update_card(self.refunds_card, refunds)
-        DashboardCards.update_card(self.discount_card, discount_total)
     
     def refresh_dashboard(self):
         from_date, to_date = self.filters.get_date_range()
@@ -234,7 +323,7 @@ class DashboardPage(QWidget):
         # Update KPI cards (today's data)
         self.update_kpi_cards()
         
-        # Update financial summary cards
+        # Update financial summary cards (period data)
         self.update_financial_cards(from_date, to_date)
         
         # Update backup status
@@ -257,6 +346,8 @@ class DashboardPage(QWidget):
         rows = cursor.fetchall()
         
         self.table.setRowCount(0)
+        symbol = self.filters.get_currency_symbol()
+        
         for row in rows:
             sale_date, daily_gross, daily_refunds, daily_discount = row
             daily_net = daily_gross - daily_refunds
@@ -273,11 +364,11 @@ class DashboardPage(QWidget):
             r = self.table.rowCount()
             self.table.insertRow(r)
             self.table.setItem(r, 0, QTableWidgetItem(sale_date))
-            self.table.setItem(r, 1, QTableWidgetItem(format_money(daily_gross)))
-            self.table.setItem(r, 2, QTableWidgetItem(format_money(daily_net)))
-            self.table.setItem(r, 3, QTableWidgetItem(format_money(daily_profit)))
-            self.table.setItem(r, 4, QTableWidgetItem(format_money(daily_refunds)))
-            self.table.setItem(r, 5, QTableWidgetItem(format_money(daily_discount)))
+            self.table.setItem(r, 1, QTableWidgetItem(format_money(daily_gross, symbol)))
+            self.table.setItem(r, 2, QTableWidgetItem(format_money(daily_net, symbol)))
+            self.table.setItem(r, 3, QTableWidgetItem(format_money(daily_profit, symbol)))
+            self.table.setItem(r, 4, QTableWidgetItem(format_money(daily_refunds, symbol)))
+            self.table.setItem(r, 5, QTableWidgetItem(format_money(daily_discount, symbol)))
         
         conn.close()
     
@@ -306,35 +397,41 @@ class DashboardPage(QWidget):
         lang_code = self.get_lang()
         self.filters.retranslateUi(lang_code)
         
-        # Update KPI card titles
+        # ============================================================
+        # ✅ UPDATE ALL CARD TITLES
+        # ============================================================
         if lang_code == "my":
+            # Row 1: Today Cards
             self.today_sales_card.title_label.setText("ယနေ့ရောင်းအား")
             self.today_expense_card.title_label.setText("ယနေ့အသုံးစရိတ်")
             self.today_profit_card.title_label.setText("ယနေ့အမြတ်")
+            self.today_refunds_card.title_label.setText("ယနေ့ပြန်အမ်းငွေ")
+            self.today_discount_card.title_label.setText("ယနေ့လျှော့စျေး")
+            
+            # Row 2: Other Cards
             self.outstanding_card.title_label.setText("ကျန်အကြွေး")
             self.low_stock_card.title_label.setText("စတော့နည်းနေသောပစ္စည်း")
-            
             self.gross_sales_card.title_label.setText("စုစုပေါင်းရောင်းအား")
             self.net_sales_card.title_label.setText("အသားတင်ရောင်းအား")
             self.gross_profit_card.title_label.setText("အသားတင်အမြတ်")
-            self.refunds_card.title_label.setText("ပြန်အမ်းငွေများ")
-            self.discount_card.title_label.setText("လျှော့စျေး")
             self.backup_card.title_label.setText("Database Backup")
             
             headers = ["ရက်စွဲ", "စုစုပေါင်းရောင်းအား", "အသားတင်ရောင်းအား",
                        "အသားတင်အမြတ်", "ပြန်အမ်းငွေများ", "လျှော့စျေး"]
         else:
+            # Row 1: Today Cards
             self.today_sales_card.title_label.setText("Today's Sales")
             self.today_expense_card.title_label.setText("Today's Expense")
             self.today_profit_card.title_label.setText("Today's Profit")
+            self.today_refunds_card.title_label.setText("Today Refunds")
+            self.today_discount_card.title_label.setText("Today Discount")
+            
+            # Row 2: Other Cards
             self.outstanding_card.title_label.setText("Outstanding Credit")
             self.low_stock_card.title_label.setText("Low Stock Count")
-            
             self.gross_sales_card.title_label.setText("Gross Sales")
             self.net_sales_card.title_label.setText("Net Sales")
             self.gross_profit_card.title_label.setText("Gross Profit")
-            self.refunds_card.title_label.setText("Refunds")
-            self.discount_card.title_label.setText("Discount")
             self.backup_card.title_label.setText("Database Backup")
             
             headers = ["Date", "Gross Sales", "Net Sales", "Gross Profit", "Refunds", "Discount"]
@@ -344,6 +441,10 @@ class DashboardPage(QWidget):
         
         # Refresh to update colors
         self.update_kpi_cards()
+        self.update_financial_cards(
+            self.filters.from_date.date().toString("yyyy-MM-dd"),
+            self.filters.to_date.date().toString("yyyy-MM-dd")
+        )
     
     def showEvent(self, event):
         self.refresh_dashboard()

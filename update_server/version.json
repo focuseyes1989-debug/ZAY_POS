@@ -1,10 +1,10 @@
 {
-    "version": "1.0.1",
-    "release_date": "2026-01-15",
-    "release_notes": "Bug fixes and performance improvements\n- Fixed backup/restore issue\n- Improved loading speed",
-    "download_url": "http://localhost:8000/update/ZAY_POS_v1.0.1.zip",
-    "file_hash": "sha256_hash_here",
-    "file_size": 52428800,
-    "mandatory": false,
-    "min_required_version": "1.0.0"
+  "version": "1.0.7",
+  "release_date": "2026-06-24",
+  "release_notes": "Version 1.0.7 released",
+  "download_url": "http://localhost:8000/update/ZAY_POS_v1.0.7.zip",
+  "file_hash": "cc96389f7567a24a072faa94c3abf0f2acf60fcfcd9afd31a4aac078087303a5",
+  "file_size": 1307906,
+  "mandatory": false,
+  "min_required_version": "1.0.0"
 }

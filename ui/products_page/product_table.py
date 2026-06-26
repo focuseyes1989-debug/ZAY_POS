@@ -1,3 +1,4 @@
+# ui/products_page/product_table.py
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QTableWidget, QTableWidgetItem,
     QHeaderView, QLabel, QInputDialog, QHBoxLayout
@@ -13,12 +14,74 @@ import functools
 import os
 
 
+def _find_image_file(search_dir, filename):
+    """Recursively search for an image file in a directory."""
+    if not os.path.isdir(search_dir):
+        return None
+    
+    for root, _, files in os.walk(search_dir):
+        if filename in files:
+            return os.path.join(root, files)
+    
+    return None
+
+
 def resolve_image_path(image_path: str):
+    """Resolve image path with fallback."""
     if not image_path:
         return ""
+    
+    # ✅ If path is already absolute, use it
     if os.path.isabs(image_path):
-        return image_path
-    return app_path(image_path)
+        if os.path.exists(image_path):
+            return image_path
+        # If absolute path doesn't exist, try to find relative
+        return _find_relative_image(image_path)
+    
+    # ✅ Try relative paths
+    possible_paths = [
+        image_path,
+        os.path.join('database', 'product_images', os.path.basename(image_path)),
+        app_path(image_path),
+        app_path('database', 'product_images', os.path.basename(image_path)),
+    ]
+    
+    for path in possible_paths:
+        if os.path.exists(path):
+            return path
+    
+    # ✅ Last resort: search in product_images directory
+    product_images_dir = app_path('database', 'product_images')
+    if os.path.isdir(product_images_dir):
+        filename = os.path.basename(image_path)
+        found = _find_image_file(product_images_dir, filename)
+        if found:
+            return found
+    
+    return image_path
+
+
+def _find_relative_image(image_path):
+    """Try to find an image by its filename in common locations."""
+    if not image_path:
+        return None
+    
+    filename = os.path.basename(image_path)
+    
+    # Search in common locations
+    search_dirs = [
+        'database/product_images',
+        'database/product_images/thumbnails',
+        'assets/images/products',
+        '.',
+    ]
+    
+    for search_dir in search_dirs:
+        full_path = os.path.join(search_dir, filename)
+        if os.path.exists(full_path):
+            return full_path
+    
+    return None
 
 
 @functools.lru_cache(maxsize=200)
@@ -32,13 +95,16 @@ def load_thumbnail(image_path: str, size: int = 50):
         return None
     
     # Use optimized thumbnail from image_optimizer
-    from utils.image_optimizer import ImageOptimizer
-    thumb_path = ImageOptimizer.get_thumbnail_path(resolved_path, (size, size))
-    
-    if thumb_path and os.path.exists(thumb_path):
-        pixmap = QPixmap(thumb_path)
-        if not pixmap.isNull():
-            return pixmap
+    try:
+        from utils.image_optimizer import ImageOptimizer
+        thumb_path = ImageOptimizer.get_thumbnail_path(resolved_path, (size, size))
+        
+        if thumb_path and os.path.exists(thumb_path):
+            pixmap = QPixmap(thumb_path)
+            if not pixmap.isNull():
+                return pixmap
+    except:
+        pass
     
     # Fallback: original method
     reader = QImageReader(resolved_path)

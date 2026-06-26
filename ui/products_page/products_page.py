@@ -218,6 +218,8 @@ class ProductsPage(QWidget):
                                          "Add Product", f"Product: {product_name}")
             # Emit signal to update sales page categories
             self.categories_changed.emit()
+            # Refresh current stock tab categories
+            self.refresh_current_stock_categories()
             logger.info("New product added")
 
     def edit_product(self):
@@ -247,6 +249,8 @@ class ProductsPage(QWidget):
             if hasattr(main_window, 'current_user'):
                 self.service.log_activity(main_window.current_user["id"], main_window.current_user["username"],
                                          "Edit Product", f"Product: {product_name}")
+            # Refresh current stock tab categories
+            self.refresh_current_stock_categories()
             logger.info(f"Product edited: ID {prod_id}")
 
     def delete_product(self):
@@ -284,6 +288,8 @@ class ProductsPage(QWidget):
             self.update_cards()
             if hasattr(main_window, 'inventory_page'):
                 main_window.inventory_page.refresh_all()
+            # Refresh current stock tab categories
+            self.refresh_current_stock_categories()
 
     def print_barcode(self):
         prod_id = self.table.get_selected_product_id()
@@ -315,6 +321,8 @@ class ProductsPage(QWidget):
             self.update_cards()
             # Emit signal to notify main window (which will forward to sales page)
             self.categories_changed.emit()
+            # Refresh current stock tab categories
+            self.refresh_current_stock_categories()
             logger.info("Categories managed")
 
     def on_categories_changed(self):
@@ -324,6 +332,18 @@ class ProductsPage(QWidget):
         self.update_cards()
         # Emit signal to update sales page
         self.categories_changed.emit()
+        # Refresh current stock tab categories
+        self.refresh_current_stock_categories()
+
+    def refresh_current_stock_categories(self):
+        """Refresh current stock tab categories filter"""
+        main_window = self.window()
+        if hasattr(main_window, 'inventory_page'):
+            inventory = main_window.inventory_page
+            if hasattr(inventory, 'current_stock_tab'):
+                inventory.current_stock_tab.load_categories()
+                inventory.current_stock_tab.refresh()
+                logger.info("Current stock tab categories refreshed")
 
     def export_products(self):
         rows = self.table.get_current_rows()
@@ -339,6 +359,8 @@ class ProductsPage(QWidget):
         main_window = self.window()
         if hasattr(main_window, 'inventory_page'):
             main_window.inventory_page.refresh_all()
+        # Refresh current stock tab categories
+        self.refresh_current_stock_categories()
 
     # ========== EXCEL EXPORT FUNCTIONS ==========
     
